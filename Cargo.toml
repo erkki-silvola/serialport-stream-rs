@@ -1,0 +1,34 @@
+[package]
+name = "serialport-stream"
+version = "0.1.0"
+edition = "2021"
+authors = ["Erkki Silvola"]
+description = "Async TryStream wrapper for serialport-rs using platform-specific I/O"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/erkkisilvola/serialport-stream-rs"
+keywords = ["serialport", "async", "stream", "futures"]
+categories = ["asynchronous", "hardware-support"]
+
+[dependencies]
+serialport = "4.8.1"
+futures = { version = "0.3", features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30.1", features = ["poll"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Devices_Communication",
+    "Win32_System_SystemServices",
+] }
+
+[dev-dependencies]
+futures-lite = "2.0"
+clap = { version = "3.1.6", features = ["derive"] }
+ctrlc = "3.5.1"
+anyhow = "1.0.100"

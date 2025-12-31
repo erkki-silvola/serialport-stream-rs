@@ -4,26 +4,23 @@ use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll as TaskPoll};
+use std::sync::Arc;
 
-use futures::task::AtomicWaker;
 use nix::poll::{poll, PollFd, PollFlags};
 use serialport::SerialPort;
 
-use crate::SerialPortStreamBuilder;
+use crate::{EventsInner, SerialPortStreamBuilder};
 
+/// Unix-specific fields
 #[derive(Debug)]
-struct EventsInner {
-    in_buffer: Mutex<Vec<u8>>,
-    stream_error: Mutex<Option<std::io::Error>>,
-    waker: AtomicWaker,
+struct UnixInner {
     cancel_pipe: (OwnedFd, OwnedFd),
 }
 
 pub struct PlatformStream {
     thread_handle: Option<std::thread::JoinHandle<()>>,
     inner: Arc<EventsInner>,
+    unix_inner: UnixInner,
     port: Option<serialport::TTYPort>,
 }
 
@@ -31,7 +28,7 @@ impl Drop for PlatformStream {
     fn drop(&mut self) {
         if let Some(handle) = self.thread_handle.take() {
             if !handle.is_finished() {
-                let fd = self.inner.cancel_pipe.1.as_fd();
+                let fd = self.unix_inner.cancel_pipe.1.as_fd();
                 assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
                 handle.join().unwrap();
             }
@@ -40,7 +37,10 @@ impl Drop for PlatformStream {
 }
 
 impl PlatformStream {
-    pub fn new(builder: SerialPortStreamBuilder) -> Result<Self, std::io::Error> {
+    pub fn new(
+        builder: SerialPortStreamBuilder,
+        inner: Arc<EventsInner>,
+    ) -> Result<Self, std::io::Error> {
         let serialport_builder = serialport::new(builder.path, builder.baud_rate)
             .timeout(builder.timeout)
             .data_bits(builder.data_bits)
@@ -52,40 +52,64 @@ impl PlatformStream {
         let port = serialport_builder.open_native()?;
 
         let cancel_pipe = nix::unistd::pipe().unwrap();
-        let inner = Arc::new(EventsInner {
-            in_buffer: Mutex::new(Vec::new()),
-            stream_error: Mutex::new(None),
-            waker: AtomicWaker::new(),
-            cancel_pipe,
-        });
+        let unix_inner = UnixInner { cancel_pipe };
 
         Ok(Self {
             thread_handle: None,
             inner,
+            unix_inner,
             port: Some(port),
         })
+    }
+
+    pub fn is_thread_started(&self) -> bool {
+        self.thread_handle.is_some()
+    }
+
+    pub fn start_thread(&mut self) {
+        assert_eq!(self.thread_handle.is_some(), false);
+
+        let (tx, rx) = mpsc::channel();
+        let inner_cloned = self.inner.clone();
+        let cancel_fd = self.unix_inner.cancel_pipe.0.as_raw_fd();
+        let port = self.port.take().unwrap();
+
+        self.thread_handle = Some(std::thread::spawn(move || {
+            tx.send(0).unwrap();
+            if let Err(err) = Self::receive_thread(&inner_cloned, port, cancel_fd) {
+                *inner_cloned.stream_error.lock().unwrap() = Some(err);
+                inner_cloned.waker.wake();
+            }
+        }));
+        rx.recv().expect("Failed to start thread");
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if let Some(ref mut port) = self.port {
             return port.read(buf);
         }
-        todo!();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Port not available",
+        ))
     }
 
     pub fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if let Some(ref mut port) = self.port {
             return port.write(buf);
         }
-        todo!();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Port not available",
+        ))
     }
 
     fn receive_thread(
         inner: &Arc<EventsInner>,
         mut port: serialport::TTYPort,
+        cancel_fd: i32,
     ) -> std::io::Result<()> {
         let port_fd = port.as_raw_fd();
-        let cancel_fd = inner.cancel_pipe.0.as_raw_fd();
 
         loop {
             let port_fd_ = unsafe { BorrowedFd::borrow_raw(port_fd) };
@@ -127,39 +151,13 @@ impl PlatformStream {
         }
     }
 
-    pub fn try_poll_next(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> TaskPoll<Option<Result<Vec<u8>, std::io::Error>>> {
-        self.inner.waker.register(cx.waker());
-
-        if let Some(err) = self.inner.stream_error.lock().unwrap().as_ref() {
-            return TaskPoll::Ready(Some(Err(std::io::Error::new(err.kind(), err.to_string()))));
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            return port.flush();
         }
-
-        if self.thread_handle.is_none() {
-            let (tx, rx) = mpsc::channel();
-            let inner_cloned = self.inner.clone();
-            let port = self.port.take().unwrap();
-            self.thread_handle = Some(std::thread::spawn(move || {
-                tx.send(0).unwrap();
-                if let Err(err) = Self::receive_thread(&inner_cloned, port) {
-                    *inner_cloned.stream_error.lock().unwrap() = Some(err);
-                    inner_cloned.waker.wake();
-                }
-            }));
-            rx.recv().expect("failed to start thread");
-            return TaskPoll::Pending;
-        }
-
-        let mut buffer = self.inner.in_buffer.lock().unwrap();
-
-        if !buffer.is_empty() {
-            // Drain all available data
-            let buf = buffer.drain(..).collect();
-            return TaskPoll::Ready(Some(Ok(buf)));
-        }
-
-        TaskPoll::Pending
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Port not available",
+        ))
     }
 }

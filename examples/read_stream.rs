@@ -35,9 +35,11 @@ fn main() -> anyhow::Result<()> {
     .expect("Error setting Ctrl-C handler");
 
     let handle: JoinHandle<anyhow::Result<()>> = std::thread::spawn(move || {
+        let mut total = 0;
         for event in stream::block_on(stream) {
             let bytes = event?;
-            println!("bytes len {}", bytes.len());
+            total += bytes.len();
+            println!("bytes len {} total {total}", bytes.len());
         }
 
         Ok(())

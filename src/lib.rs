@@ -1,14 +1,34 @@
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 mod platform;
 
 use crate::platform::PlatformStream;
+use futures::task::AtomicWaker;
 
 pub use futures::stream::{Stream, TryStreamExt};
 pub use serialport;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
+
+/// Shared event structure for both Unix and Windows platforms
+#[derive(Debug)]
+pub(crate) struct EventsInner {
+    pub(crate) in_buffer: Mutex<Vec<u8>>,
+    pub(crate) stream_error: Mutex<Option<std::io::Error>>,
+    pub(crate) waker: AtomicWaker,
+}
+
+impl EventsInner {
+    pub(crate) fn new() -> Self {
+        Self {
+            in_buffer: Mutex::new(Vec::new()),
+            stream_error: Mutex::new(None),
+            waker: AtomicWaker::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortStreamBuilder {
@@ -79,8 +99,10 @@ impl SerialPortStreamBuilder {
     }
 
     pub fn open(self) -> std::io::Result<SerialPortStream> {
+        let inner = Arc::new(EventsInner::new());
         Ok(SerialPortStream {
-            platform: PlatformStream::new(self)?,
+            platform: PlatformStream::new(self, inner.clone())?,
+            inner,
         })
     }
 }
@@ -103,6 +125,34 @@ pub fn new<'a>(
 
 pub struct SerialPortStream {
     platform: PlatformStream,
+    inner: Arc<EventsInner>,
+}
+
+impl SerialPortStream {
+    fn try_poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+        self.inner.waker.register(cx.waker());
+
+        if let Some(err) = self.inner.stream_error.lock().unwrap().as_ref() {
+            return Poll::Ready(Some(Err(std::io::Error::new(err.kind(), err.to_string()))));
+        }
+
+        if !self.platform.is_thread_started() {
+            self.platform.start_thread();
+            return Poll::Pending;
+        }
+
+        let mut buffer = self.inner.in_buffer.lock().unwrap();
+        if !buffer.is_empty() {
+            // Drain all available data
+            let data = buffer.drain(..).collect();
+            return Poll::Ready(Some(Ok(data)));
+        }
+
+        Poll::Pending
+    }
 }
 
 impl std::io::Read for SerialPortStream {
@@ -117,7 +167,7 @@ impl std::io::Write for SerialPortStream {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        todo!();
+        self.platform.flush()
     }
 }
 
@@ -125,6 +175,6 @@ impl Stream for SerialPortStream {
     type Item = Result<Vec<u8>, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.platform.try_poll_next(cx)
+        self.try_poll_next(cx)
     }
 }

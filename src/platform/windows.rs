@@ -1,21 +1,17 @@
-use futures::task::AtomicWaker;
 use std::io;
 use std::os::windows::prelude::*;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Poll as TaskPoll};
+use std::sync::Arc;
 use std::{mem::MaybeUninit, ptr};
 use windows_sys::Win32::Devices::Communication::*;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::*;
-use windows_sys::Win32::System::Threading::CreateEventW;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::IO::*;
 
 use serialport::COMPort;
 use serialport::SerialPort;
-use serialport::SerialPortBuilder;
 
-use crate::SerialPortStreamBuilder;
+use crate::{EventsInner, SerialPortStreamBuilder};
 
 /// OVERLAPPED wrapper that manages the event handle
 struct Overlapped(OVERLAPPED);
@@ -51,24 +47,16 @@ struct HandleWrapper(HANDLE);
 unsafe impl Send for HandleWrapper {}
 unsafe impl Sync for HandleWrapper {}
 
-#[derive(Debug)]
-struct EventsInner {
-    in_buffer: Mutex<Vec<u8>>,
-    stream_error: Mutex<Option<io::Error>>,
-    waker: AtomicWaker,
-}
-
 pub struct PlatformStream {
     thread_handle: Option<std::thread::JoinHandle<()>>,
     abort_event: HandleWrapper,
     inner: Arc<EventsInner>,
-    file_handle: HandleWrapper,
     port: Option<serialport::COMPort>,
     timeout: std::time::Duration,
 }
 
 impl PlatformStream {
-    pub fn new(builder: SerialPortStreamBuilder) -> io::Result<Self> {
+    pub fn new(builder: SerialPortStreamBuilder, inner: Arc<EventsInner>) -> io::Result<Self> {
         let path = builder.path;
         let mut name = Vec::<u16>::with_capacity(4 + path.len() + 1);
 
@@ -107,10 +95,20 @@ impl PlatformStream {
             let _ = com.write_data_terminal_ready(dtr);
         }
 
-        let handle = HandleWrapper(handle as HANDLE);
+        let timeouts = COMMTIMEOUTS {
+            ReadIntervalTimeout: u32::MAX,
+            ReadTotalTimeoutMultiplier: u32::MAX,
+            ReadTotalTimeoutConstant: u32::MAX,
+            WriteTotalTimeoutMultiplier: u32::MAX,
+            WriteTotalTimeoutConstant: u32::MAX,
+        };
+
+        if unsafe { SetCommTimeouts(handle, &timeouts) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
 
         // Enable EV_RXCHAR event
-        if unsafe { SetCommMask(handle.0, EV_RXCHAR) } == 0 {
+        if unsafe { SetCommMask(handle, EV_RXCHAR) } == 0 {
             return Err(io::Error::last_os_error());
         }
 
@@ -121,171 +119,166 @@ impl PlatformStream {
         }
         let abort_event = HandleWrapper(abort_event);
 
-        let inner = Arc::new(EventsInner {
-            in_buffer: Mutex::new(Vec::new()),
-            stream_error: Mutex::new(None),
-            waker: AtomicWaker::new(),
-        });
-
         Ok(Self {
             thread_handle: None,
             abort_event,
             inner,
-            file_handle: handle,
             port: Some(com),
-            timeout: std::time::Duration::from_secs(1),
+            timeout: builder.timeout,
         })
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut len = 0;
+        if let Some(ref mut port) = self.port {
+            let handle = port.as_raw_handle();
 
-        let mut overlapped = Overlapped::new()?;
+            let mut len = 0;
 
-        let process_result = |len| -> io::Result<usize> {
-            if len != 0 {
-                return Ok(len as usize);
-            }
-            // if timeout occured len == 0
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Operation timed out",
-            ))
-        };
+            let mut overlapped = Overlapped::new()?;
 
-        match unsafe {
-            ReadFile(
-                self.file_handle.0,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                &mut len,
-                &mut overlapped.0,
-            )
-        } {
-            FALSE => match unsafe { GetLastError() } {
-                ERROR_IO_PENDING => {
-                    let timeout = u128::min(self.timeout.as_millis(), INFINITE as u128 - 1) as u32;
-                    match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(
-                                    self.file_handle.0,
-                                    &mut overlapped.0,
-                                    &mut len,
-                                    TRUE,
-                                )
-                            } == TRUE
-                            {
-                                return process_result(len);
-                            }
-                            Err(io::Error::last_os_error())
-                        }
-                        WAIT_TIMEOUT => {
-                            if unsafe { CancelIo(self.file_handle.0) } == TRUE {
-                                let _ = unsafe {
-                                    GetOverlappedResult(
-                                        self.file_handle.0,
-                                        &mut overlapped.0,
-                                        &mut len,
-                                        TRUE,
-                                    )
-                                };
-                            }
-                            Err(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "Operation timed out",
-                            ))
-                        }
-                        _ => Err(io::Error::last_os_error()),
-                    }
+            let process_result = |len| -> io::Result<usize> {
+                if len != 0 {
+                    return Ok(len as usize);
                 }
-                _ => Err(io::Error::last_os_error()),
-            },
-            _ => process_result(len),
+                // if timeout occured len == 0
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Operation timed out",
+                ))
+            };
+
+            match unsafe {
+                ReadFile(
+                    handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut len,
+                    &mut overlapped.0,
+                )
+            } {
+                FALSE => match unsafe { GetLastError() } {
+                    ERROR_IO_PENDING => {
+                        let timeout =
+                            u128::min(self.timeout.as_millis(), INFINITE as u128 - 1) as u32;
+                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
+                            WAIT_OBJECT_0 => {
+                                if unsafe {
+                                    GetOverlappedResult(handle, &mut overlapped.0, &mut len, TRUE)
+                                } == TRUE
+                                {
+                                    return process_result(len);
+                                }
+                                return Err(io::Error::last_os_error());
+                            }
+                            WAIT_TIMEOUT => {
+                                cancel_io(handle, &mut overlapped, &mut len);
+                                return Err(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "Operation timed out",
+                                ));
+                            }
+                            _ => return Err(io::Error::last_os_error()),
+                        }
+                    }
+                    _ => return Err(io::Error::last_os_error()),
+                },
+                _ => {
+                    return process_result(len);
+                }
+            }
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "port not available",
+        ))
     }
 
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut len = 0;
+        if let Some(ref mut port) = self.port {
+            let handle = port.as_raw_handle();
 
-        let mut overlapped = Overlapped::new()?;
+            let mut len = 0;
 
-        match unsafe {
-            WriteFile(
-                self.file_handle.0,
-                buf.as_ptr(),
-                buf.len() as u32,
-                &mut len,
-                &mut overlapped.0,
-            )
-        } {
-            FALSE => match unsafe { GetLastError() } {
-                ERROR_IO_PENDING => {
-                    match unsafe { WaitForSingleObject(overlapped.0.hEvent, INFINITE) } as u32 {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(
-                                    self.file_handle.0,
-                                    &mut overlapped.0,
-                                    &mut len,
-                                    TRUE,
-                                )
-                            } == TRUE
-                            {
-                                Ok(len as usize)
-                            } else {
-                                Err(io::Error::last_os_error())
+            let mut overlapped = Overlapped::new()?;
+
+            match unsafe {
+                WriteFile(
+                    handle,
+                    buf.as_ptr(),
+                    buf.len() as u32,
+                    &mut len,
+                    &mut overlapped.0,
+                )
+            } {
+                FALSE => match unsafe { GetLastError() } {
+                    ERROR_IO_PENDING => {
+                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, INFINITE) } as u32 {
+                            WAIT_OBJECT_0 => {
+                                if unsafe {
+                                    GetOverlappedResult(handle, &mut overlapped.0, &mut len, TRUE)
+                                } == TRUE
+                                {
+                                    return Ok(len as usize);
+                                } else {
+                                    return Err(io::Error::last_os_error());
+                                }
                             }
+                            WAIT_TIMEOUT => {
+                                cancel_io(handle, &mut overlapped, &mut len);
+                                return Err(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "Operation timed out",
+                                ));
+                            }
+                            _ => return Err(io::Error::last_os_error()),
                         }
-                        _ => Err(io::Error::last_os_error()),
                     }
-                }
-                _ => Err(io::Error::last_os_error()),
-            },
-            _ => Ok(len as usize),
+                    _ => return Err(io::Error::last_os_error()),
+                },
+                _ => return Ok(len as usize),
+            }
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "port not available",
+        ))
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
-        match unsafe { FlushFileBuffers(self.file_handle.0) } {
-            0 => Err(io::Error::last_os_error()),
-            _ => Ok(()),
+        if let Some(ref mut port) = self.port {
+            let handle = port.as_raw_handle();
+
+            match unsafe { FlushFileBuffers(handle) } {
+                0 => return Err(io::Error::last_os_error()),
+                _ => return Ok(()),
+            }
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "port not available",
+        ))
     }
 
-    pub fn try_poll_next(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Vec<u8>, io::Error>>> {
-        self.inner.waker.register(cx.waker());
+    pub fn is_thread_started(&self) -> bool {
+        self.thread_handle.is_some()
+    }
 
-        if let Some(err) = self.inner.stream_error.lock().unwrap().as_ref() {
-            return TaskPoll::Ready(Some(Err(std::io::Error::new(err.kind(), err.to_string()))));
-        }
+    pub fn start_thread(&mut self) {
+        assert_eq!(self.thread_handle.is_some(), false);
 
-        if self.thread_handle.is_none() {
-            let inner_cloned = self.inner.clone();
-            let abort_event_cloned = self.abort_event.clone();
-            let handle = self.file_handle.clone();
-            let port = self.port.take().unwrap();
-            self.thread_handle = Some(std::thread::spawn(move || {
-                if let Err(e) =
-                    receive_events(port, handle, abort_event_cloned, inner_cloned.clone())
-                {
-                    *inner_cloned.stream_error.lock().unwrap() = Some(e);
-                    inner_cloned.waker.wake();
-                }
-            }));
-        }
+        let inner_cloned = self.inner.clone();
+        let abort_event_cloned = self.abort_event.clone();
+        let port = self.port.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        // Check for data
-        let mut buffer = self.inner.in_buffer.lock().unwrap();
-        if !buffer.is_empty() {
-            let data = buffer.drain(..).collect();
-            return Poll::Ready(Some(Ok(data)));
-        }
-
-        Poll::Pending
+        self.thread_handle = Some(std::thread::spawn(move || {
+            tx.send(0).unwrap();
+            if let Err(e) = receive_events(port, abort_event_cloned, inner_cloned.clone()) {
+                *inner_cloned.stream_error.lock().unwrap() = Some(e);
+                inner_cloned.waker.wake();
+            }
+        }));
+        rx.recv().expect("Failed to start thread");
     }
 }
 
@@ -304,12 +297,12 @@ impl Drop for PlatformStream {
 
 fn receive_events(
     port: serialport::COMPort,
-    handle: HandleWrapper,
     abort_event: HandleWrapper,
     inner: Arc<EventsInner>,
 ) -> io::Result<()> {
+    let handle = port.as_raw_handle();
     // Purge any pending data first
-    purge_pending_data(handle.0, &inner)?;
+    purge_pending_data(handle, &inner)?;
 
     loop {
         // Check if abort was signaled
@@ -323,7 +316,7 @@ fn receive_events(
                 let mut mask: u32 = 0;
 
                 assert_eq!(
-                    unsafe { WaitCommEvent(handle.0, &mut mask, overlapped.as_mut_ptr()) },
+                    unsafe { WaitCommEvent(handle, &mut mask, overlapped.as_mut_ptr()) },
                     0
                 );
 
@@ -340,21 +333,20 @@ fn receive_events(
                         )
                     } {
                         WAIT_OBJECT_0 => {
-                            // Comm event occurred
                             let mut len = 0;
                             if unsafe {
-                                GetOverlappedResult(handle.0, overlapped.as_mut_ptr(), &mut len, 1)
+                                GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1)
                             } == 0
                             {
                                 return Err(io::Error::last_os_error());
                             }
-                            // Read the data
-                            purge_pending_data(handle.0, &inner)?;
+                            purge_pending_data(handle, &inner)?;
                             continue;
                         }
                         val if val == WAIT_OBJECT_0 + 1 => {
                             // Abort signaled
-                            cancel_io(handle.0, &mut overlapped);
+                            let mut len = 0;
+                            cancel_io(handle, &mut overlapped, &mut len);
                             return Ok(());
                         }
                         _ => {
@@ -373,71 +365,60 @@ fn receive_events(
 }
 
 fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()> {
-    loop {
-        let mut errors: u32 = 0;
-        let mut comstat = MaybeUninit::<COMSTAT>::uninit();
+    let mut errors: u32 = 0;
+    let mut comstat = MaybeUninit::<COMSTAT>::uninit();
 
-        if unsafe { ClearCommError(handle, &mut errors, comstat.as_mut_ptr()) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
+    if unsafe { ClearCommError(handle, &mut errors, comstat.as_mut_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
 
-        let len = unsafe { comstat.assume_init() }.cbInQue;
-        if len > 0 {
-            let mut buf = vec![0u8; len as usize];
-            let mut overlapped = Overlapped::new()?;
-            let mut bytes_read: u32 = 0;
+    let len = unsafe { comstat.assume_init() }.cbInQue;
+    if len > 0 {
+        let mut buf = vec![0u8; len as usize];
+        let mut overlapped = Overlapped::new()?;
+        let mut bytes_read: u32 = 0;
 
-            if unsafe {
-                ReadFile(
-                    handle,
-                    buf.as_mut_ptr() as *mut _,
-                    buf.len() as u32,
-                    &mut bytes_read,
-                    overlapped.as_mut_ptr(),
-                )
-            } == 0
-            {
-                // Check if operation is pending
-                if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    // Wait for the read to complete
-                    match unsafe { WaitForSingleObject(overlapped.0.hEvent as HANDLE, INFINITE) } {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(
-                                    handle,
-                                    overlapped.as_mut_ptr(),
-                                    &mut bytes_read,
-                                    1,
-                                )
-                            } == 0
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                        }
-                        _ => {
+        if unsafe {
+            ReadFile(
+                handle,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+                &mut bytes_read,
+                overlapped.as_mut_ptr(),
+            )
+        } == FALSE
+        {
+            if unsafe { GetLastError() } == ERROR_IO_PENDING {
+                match unsafe { WaitForSingleObject(overlapped.0.hEvent as HANDLE, INFINITE) } {
+                    WAIT_OBJECT_0 => {
+                        if unsafe {
+                            GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut bytes_read, 1)
+                        } == 0
+                        {
                             return Err(io::Error::last_os_error());
                         }
                     }
-                } else {
-                    return Err(io::Error::last_os_error());
+                    _ => {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
+            } else {
+                return Err(io::Error::last_os_error());
             }
-
-            buf.truncate(bytes_read as usize);
-            inner.in_buffer.lock().unwrap().extend(buf);
-        } else {
-            inner.waker.wake();
-            return Ok(());
         }
-    }
 
-    Ok(())
+        buf.truncate(bytes_read as usize);
+        inner.in_buffer.lock().unwrap().extend(buf);
+        inner.waker.wake();
+    }
+    return Ok(());
 }
 
-fn cancel_io(handle: HANDLE, overlapped: &mut Overlapped) {
-    unsafe {
-        CancelIoEx(handle, overlapped.as_mut_ptr());
-        let mut len = 0;
-        GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1);
-    }
+fn cancel_io(handle: HANDLE, overlapped: &mut Overlapped, len: &mut u32) {
+    assert_eq!(unsafe { CancelIo(handle) }, TRUE);
+    assert_eq!(
+        unsafe { GetOverlappedResult(handle, &mut overlapped.0, len, TRUE,) },
+        FALSE
+    );
+    assert_eq!(*len, 0);
 }

@@ -6,8 +6,10 @@ authors = ["Erkki Silvola"]
 description = "Async TryStream wrapper for serialport-rs using platform-specific I/O"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/erkkisilvola/serialport-stream-rs"
+homepage = "https://github.com/erkkisilvola/serialport-stream-rs"
 keywords = ["serialport", "async", "stream", "futures"]
 categories = ["asynchronous", "hardware-support"]
+readme = "README.md"
 
 [dependencies]
 serialport = "4.8.1"

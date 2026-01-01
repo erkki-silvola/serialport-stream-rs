@@ -1,3 +1,9 @@
+//! # serialport-stream
+//!
+//! A runtime-agnostic async stream wrapper for `serialport-rs` that provides efficient
+//! asynchronous serial port I/O using platform-specific mechanisms.
+//!
+
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -12,7 +18,6 @@ pub use futures::stream::{Stream, TryStreamExt};
 pub use serialport;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
-/// Shared event structure for both Unix and Windows platforms
 #[derive(Debug)]
 pub(crate) struct EventsInner {
     pub(crate) in_buffer: Mutex<Vec<u8>>,
@@ -30,6 +35,29 @@ impl EventsInner {
     }
 }
 
+/// Builder for configuring and opening a serial port stream.
+///
+/// Use the [`new()`] function to create a builder, then chain configuration
+/// methods before calling [`open()`](SerialPortStreamBuilder::open).
+///
+/// # Example
+///
+/// ```no_run
+/// use serialport_stream::new;
+/// use serialport::{DataBits, Parity, StopBits, FlowControl};
+/// use std::time::Duration;
+///
+/// # fn example() -> std::io::Result<()> {
+/// let stream = new("/dev/ttyUSB0", 115200)
+///     .data_bits(DataBits::Eight)
+///     .parity(Parity::None)
+///     .stop_bits(StopBits::One)
+///     .flow_control(FlowControl::None)
+///     .timeout(Duration::from_millis(100))
+///     .open()?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortStreamBuilder {
     pub(crate) path: String,
@@ -43,6 +71,11 @@ pub struct SerialPortStreamBuilder {
 }
 
 impl SerialPortStreamBuilder {
+    /// Sets the path to the serial port device.
+    ///
+    /// # Examples
+    /// - Unix: `"/dev/ttyUSB0"`, `"/dev/ttyACM0"`
+    /// - Windows: `"COM3"`, `"COM10"`
     #[allow(clippy::assigning_clones)]
     #[must_use]
     pub fn path<'a>(mut self, path: impl Into<std::borrow::Cow<'a, str>>) -> Self {
@@ -50,54 +83,80 @@ impl SerialPortStreamBuilder {
         self
     }
 
+    /// Sets the baud rate (bits per second).
+    ///
+    /// Common values: 9600, 19200, 38400, 57600, 115200
     #[must_use]
     pub fn baud_rate(mut self, baud_rate: u32) -> Self {
         self.baud_rate = baud_rate;
         self
     }
 
+    /// Sets the number of data bits per character.
+    ///
+    /// Default: `DataBits::Eight`
     #[must_use]
     pub fn data_bits(mut self, data_bits: DataBits) -> Self {
         self.data_bits = data_bits;
         self
     }
 
+    /// Sets the flow control mode.
+    ///
+    /// Default: `FlowControl::None`
     #[must_use]
     pub fn flow_control(mut self, flow_control: FlowControl) -> Self {
         self.flow_control = flow_control;
         self
     }
 
+    /// Sets the parity checking mode.
+    ///
+    /// Default: `Parity::None`
     #[must_use]
     pub fn parity(mut self, parity: Parity) -> Self {
         self.parity = parity;
         self
     }
 
+    /// Sets the number of stop bits.
+    ///
+    /// Default: `StopBits::One`
     #[must_use]
     pub fn stop_bits(mut self, stop_bits: StopBits) -> Self {
         self.stop_bits = stop_bits;
         self
     }
 
+    /// Sets the timeout for read and write operations.
+    ///
+    /// Default: `Duration::from_millis(0)` (non-blocking)
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Sets the DTR (Data Terminal Ready) signal state when opening the port.
+    ///
+    /// If not called, the DTR state is preserved from the previous port state.
     #[must_use]
     pub fn dtr_on_open(mut self, state: bool) -> Self {
         self.dtr_on_open = Some(state);
         self
     }
 
+    /// Preserves the current DTR state when opening the port.
+    ///
+    /// This is the default behavior.
     #[must_use]
     pub fn preserve_dtr_on_open(mut self) -> Self {
         self.dtr_on_open = None;
         self
     }
 
+    /// Opens the serial port and creates the stream.
+    ///
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let inner = Arc::new(EventsInner::new());
         Ok(SerialPortStream {
@@ -107,6 +166,12 @@ impl SerialPortStreamBuilder {
     }
 }
 
+/// Creates a new serial port stream builder.
+///
+/// This is the main entry point for creating a serial port stream. After creating
+/// the builder, you can chain configuration methods and call `.open()` to create
+/// the stream.
+///
 pub fn new<'a>(
     path: impl Into<std::borrow::Cow<'a, str>>,
     baud_rate: u32,
@@ -123,12 +188,30 @@ pub fn new<'a>(
     }
 }
 
+/// An async stream for reading from a serial port.
+///
+/// This struct provides both synchronous and asynchronous I/O on a serial port:
+/// - Implements `std::io::Read` and `std::io::Write` for synchronous operations
+/// - Implements `futures::Stream` for asynchronous streaming of incoming data
+///
 pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
 }
 
 impl SerialPortStream {
+    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
+        self.platform.clear(buffer_to_clear)
+    }
+
+    pub fn set_break(&mut self) -> std::io::Result<()> {
+        self.platform.set_break()
+    }
+
+    pub fn clear_break(&mut self) -> std::io::Result<()> {
+        self.platform.clear_break()
+    }
+
     fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,

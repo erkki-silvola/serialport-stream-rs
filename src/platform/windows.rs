@@ -19,7 +19,7 @@ struct Overlapped(OVERLAPPED);
 impl Overlapped {
     fn new() -> io::Result<Self> {
         let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-        if event == std::ptr::null_mut() {
+        if event.is_null() {
             return Err(io::Error::last_os_error());
         }
 
@@ -57,6 +57,11 @@ pub struct PlatformStream {
 
 impl PlatformStream {
     pub fn new(builder: SerialPortStreamBuilder, inner: Arc<EventsInner>) -> io::Result<Self> {
+        if builder.timeout.as_millis() >= u32::MAX as u128 {
+            return Err(std::io::Error::other(
+                "Invalid timeout value greater than MAX u32",
+            ));
+        }
         let path = builder.path;
         let mut name = Vec::<u16>::with_capacity(4 + path.len() + 1);
 
@@ -107,14 +112,8 @@ impl PlatformStream {
             return Err(io::Error::last_os_error());
         }
 
-        // Enable EV_RXCHAR event
-        if unsafe { SetCommMask(handle, EV_RXCHAR) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Create abort event
         let abort_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-        if abort_event == std::ptr::null_mut() {
+        if abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }
         let abort_event = HandleWrapper(abort_event);
@@ -158,12 +157,11 @@ impl PlatformStream {
             } {
                 FALSE => match unsafe { GetLastError() } {
                     ERROR_IO_PENDING => {
-                        let timeout =
-                            u128::min(self.timeout.as_millis(), INFINITE as u128 - 1) as u32;
+                        let timeout = self.timeout.as_millis() as u32;
                         match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
                             WAIT_OBJECT_0 => {
                                 if unsafe {
-                                    GetOverlappedResult(handle, &mut overlapped.0, &mut len, TRUE)
+                                    GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
                                 } == TRUE
                                 {
                                     return process_result(len);
@@ -187,10 +185,7 @@ impl PlatformStream {
                 }
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -212,10 +207,11 @@ impl PlatformStream {
             } {
                 FALSE => match unsafe { GetLastError() } {
                     ERROR_IO_PENDING => {
-                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, INFINITE) } as u32 {
+                        let timeout = self.timeout.as_millis() as u32;
+                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
                             WAIT_OBJECT_0 => {
                                 if unsafe {
-                                    GetOverlappedResult(handle, &mut overlapped.0, &mut len, TRUE)
+                                    GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
                                 } == TRUE
                                 {
                                     return Ok(len as usize);
@@ -238,10 +234,7 @@ impl PlatformStream {
                 _ => return Ok(len as usize),
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
@@ -253,10 +246,7 @@ impl PlatformStream {
                 _ => return Ok(()),
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn is_thread_started(&self) -> bool {
@@ -264,7 +254,7 @@ impl PlatformStream {
     }
 
     pub fn start_thread(&mut self) {
-        assert_eq!(self.thread_handle.is_some(), false);
+        assert!(self.thread_handle.is_none());
 
         let inner_cloned = self.inner.clone();
         let abort_event_cloned = self.abort_event.clone();
@@ -280,13 +270,37 @@ impl PlatformStream {
         }));
         rx.recv().expect("Failed to start thread");
     }
+
+    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.clear(buffer_to_clear)?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn set_break(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.set_break()?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn clear_break(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.clear_break()?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
 }
 
 impl Drop for PlatformStream {
     fn drop(&mut self) {
         if let Some(handle) = self.thread_handle.take() {
             // Signal abort
-            unsafe { SetEvent(self.abort_event.0) };
+            assert_eq!(unsafe { SetEvent(self.abort_event.0) }, TRUE);
             handle.join().unwrap();
         }
         unsafe {
@@ -301,8 +315,14 @@ fn receive_events(
     inner: Arc<EventsInner>,
 ) -> io::Result<()> {
     let handle = port.as_raw_handle();
+
     // Purge any pending data first
     purge_pending_data(handle, &inner)?;
+
+    // Enable EV_RXCHAR event
+    if unsafe { SetCommMask(handle, EV_RXCHAR) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
 
     loop {
         // Check if abort was signaled
@@ -333,6 +353,11 @@ fn receive_events(
                         )
                     } {
                         WAIT_OBJECT_0 => {
+                            if (mask & EV_RXCHAR) == 0 {
+                                return Err(io::Error::other(format!(
+                                    "mask missing RXCHAR current mask {mask:X}"
+                                )));
+                            }
                             let mut len = 0;
                             if unsafe {
                                 GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1)
@@ -411,13 +436,13 @@ fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()
         inner.in_buffer.lock().unwrap().extend(buf);
         inner.waker.wake();
     }
-    return Ok(());
+    Ok(())
 }
 
 fn cancel_io(handle: HANDLE, overlapped: &mut Overlapped, len: &mut u32) {
     assert_eq!(unsafe { CancelIo(handle) }, TRUE);
     assert_eq!(
-        unsafe { GetOverlappedResult(handle, &mut overlapped.0, len, TRUE,) },
+        unsafe { GetOverlappedResult(handle, &overlapped.0, len, TRUE,) },
         FALSE
     );
     assert_eq!(*len, 0);

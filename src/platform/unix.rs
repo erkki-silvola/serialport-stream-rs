@@ -67,7 +67,7 @@ impl PlatformStream {
     }
 
     pub fn start_thread(&mut self) {
-        assert_eq!(self.thread_handle.is_some(), false);
+        assert!(self.thread_handle.is_none());
 
         let (tx, rx) = mpsc::channel();
         let inner_cloned = self.inner.clone();
@@ -88,20 +88,14 @@ impl PlatformStream {
         if let Some(ref mut port) = self.port {
             return port.read(buf);
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if let Some(ref mut port) = self.port {
             return port.write(buf);
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
     }
 
     fn receive_thread(
@@ -110,6 +104,20 @@ impl PlatformStream {
         cancel_fd: i32,
     ) -> std::io::Result<()> {
         let port_fd = port.as_raw_fd();
+
+        let purge_pending_data = |port: &mut serialport::TTYPort| -> std::io::Result<()> {
+            let bytes_count = port.bytes_to_read()?;
+            if bytes_count > 0 {
+                let mut buffer = vec![0u8; bytes_count as usize];
+                let did_read = port.read(&mut buffer)?;
+                buffer.truncate(did_read);
+                inner.in_buffer.lock().unwrap().extend(buffer);
+                inner.waker.wake();
+            }
+            Ok(())
+        };
+
+        purge_pending_data(&mut port)?;
 
         loop {
             let port_fd_ = unsafe { BorrowedFd::borrow_raw(port_fd) };
@@ -120,32 +128,22 @@ impl PlatformStream {
             ];
 
             let poll_result = poll(&mut poll_fds, nix::poll::PollTimeout::NONE)?;
-            match poll_result {
-                1 => {
-                    if let Some(cancel_poll) = poll_fds[1].revents() {
-                        if cancel_poll.contains(PollFlags::POLLIN) {
-                            // Cancel signal received, exit thread
-                            return Ok(());
-                        }
-                    }
-
-                    if let Some(port_poll) = poll_fds[0].revents() {
-                        if port_poll.contains(PollFlags::POLLIN) {
-                            let bytes_count = port.bytes_to_read()?;
-                            let mut buffer = vec![0u8; bytes_count as usize];
-                            let did_read = port.read(&mut buffer)?;
-                            buffer.truncate(did_read);
-                            inner.in_buffer.lock().unwrap().extend(buffer);
-                            inner.waker.wake();
-                        } else {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    } else {
-                        panic!("no events");
-                    }
+            if poll_result == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            assert!(poll_result != 0);
+            if let Some(cancel_poll) = poll_fds[1].revents() {
+                if cancel_poll.contains(PollFlags::POLLIN) {
+                    // Cancel signal received, exit thread
+                    return Ok(());
                 }
-                _ => {
-                    return Err(std::io::Error::last_os_error());
+            }
+
+            if let Some(port_poll) = poll_fds[0].revents() {
+                if port_poll.contains(PollFlags::POLLIN) {
+                    purge_pending_data(&mut port)?;
+                } else {
+                    return Err(std::io::Error::other("port fd events != POLLIN"));
                 }
             }
         }
@@ -153,11 +151,33 @@ impl PlatformStream {
 
     pub fn flush(&mut self) -> std::io::Result<()> {
         if let Some(ref mut port) = self.port {
-            return port.flush();
+            port.flush()?;
+            return Ok(());
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Port not available",
-        ))
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.clear(buffer_to_clear)?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn set_break(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.set_break()?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn clear_break(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.clear_break()?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
     }
 }

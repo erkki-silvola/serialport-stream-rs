@@ -36,23 +36,6 @@ fn read_serial() -> std::io::Result<()> {
 }
 ```
 
-### Advanced Configuration
-
-```rust
-use serialport_stream::new;
-use serialport::{DataBits, FlowControl, Parity, StopBits};
-use std::time::Duration;
-
-let stream = new("/dev/ttyUSB0", 115200)
-    .data_bits(DataBits::Eight)
-    .flow_control(FlowControl::None)
-    .parity(Parity::None)
-    .stop_bits(StopBits::One)
-    .timeout(Duration::from_millis(100))
-    .dtr_on_open(true)
-    .open()?;
-```
-
 ### Synchronous Read/Write
 
 ```rust

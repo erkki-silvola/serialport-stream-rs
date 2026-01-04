@@ -135,17 +135,6 @@ impl PlatformStream {
 
             let mut overlapped = Overlapped::new()?;
 
-            let process_result = |len| -> io::Result<usize> {
-                if len != 0 {
-                    return Ok(len as usize);
-                }
-                // if timeout occured len == 0
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Operation timed out",
-                ))
-            };
-
             match unsafe {
                 ReadFile(
                     handle,
@@ -158,30 +147,12 @@ impl PlatformStream {
                 FALSE => match unsafe { GetLastError() } {
                     ERROR_IO_PENDING => {
                         let timeout = self.timeout.as_millis() as u32;
-                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
-                            WAIT_OBJECT_0 => {
-                                if unsafe {
-                                    GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
-                                } == TRUE
-                                {
-                                    return process_result(len);
-                                }
-                                return Err(io::Error::last_os_error());
-                            }
-                            WAIT_TIMEOUT => {
-                                cancel_io(handle, &mut overlapped, &mut len);
-                                return Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "Operation timed out",
-                                ));
-                            }
-                            _ => return Err(io::Error::last_os_error()),
-                        }
+                        return overlapped_timed(timeout, handle, &mut overlapped);
                     }
                     _ => return Err(io::Error::last_os_error()),
                 },
                 _ => {
-                    return process_result(len);
+                    return Ok(len as usize);
                 }
             }
         }
@@ -208,26 +179,7 @@ impl PlatformStream {
                 FALSE => match unsafe { GetLastError() } {
                     ERROR_IO_PENDING => {
                         let timeout = self.timeout.as_millis() as u32;
-                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
-                            WAIT_OBJECT_0 => {
-                                if unsafe {
-                                    GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
-                                } == TRUE
-                                {
-                                    return Ok(len as usize);
-                                } else {
-                                    return Err(io::Error::last_os_error());
-                                }
-                            }
-                            WAIT_TIMEOUT => {
-                                cancel_io(handle, &mut overlapped, &mut len);
-                                return Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "Operation timed out",
-                                ));
-                            }
-                            _ => return Err(io::Error::last_os_error()),
-                        }
+                        return overlapped_timed(timeout, handle, &mut overlapped);
                     }
                     _ => return Err(io::Error::last_os_error()),
                 },
@@ -320,7 +272,7 @@ fn receive_events(
     purge_pending_data(handle, &inner)?;
 
     // Enable EV_RXCHAR event
-    if unsafe { SetCommMask(handle, EV_RXCHAR) } == 0 {
+    if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
         return Err(io::Error::last_os_error());
     }
 
@@ -353,15 +305,11 @@ fn receive_events(
                         )
                     } {
                         WAIT_OBJECT_0 => {
-                            if (mask & EV_RXCHAR) == 0 {
-                                return Err(io::Error::other(format!(
-                                    "mask missing RXCHAR current mask {mask:X}"
-                                )));
-                            }
+                            // note could check if mask == 0, but still need to wait the object signal
                             let mut len = 0;
                             if unsafe {
                                 GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1)
-                            } == 0
+                            } == FALSE
                             {
                                 return Err(io::Error::last_os_error());
                             }
@@ -393,7 +341,7 @@ fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()
     let mut errors: u32 = 0;
     let mut comstat = MaybeUninit::<COMSTAT>::uninit();
 
-    if unsafe { ClearCommError(handle, &mut errors, comstat.as_mut_ptr()) } == 0 {
+    if unsafe { ClearCommError(handle, &mut errors, comstat.as_mut_ptr()) } == FALSE {
         return Err(io::Error::last_os_error());
     }
 
@@ -418,7 +366,7 @@ fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()
                     WAIT_OBJECT_0 => {
                         if unsafe {
                             GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut bytes_read, 1)
-                        } == 0
+                        } == FALSE
                         {
                             return Err(io::Error::last_os_error());
                         }
@@ -446,4 +394,29 @@ fn cancel_io(handle: HANDLE, overlapped: &mut Overlapped, len: &mut u32) {
         FALSE
     );
     assert_eq!(*len, 0);
+}
+
+fn overlapped_timed(
+    timeout_ms: u32,
+    handle: HANDLE,
+    overlapped: &mut Overlapped,
+) -> std::io::Result<usize> {
+    let mut len = 0;
+    match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout_ms) } as u32 {
+        WAIT_OBJECT_0 => {
+            if unsafe { GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE) } == TRUE {
+                Ok(len as usize)
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        WAIT_TIMEOUT => {
+            cancel_io(handle, overlapped, &mut len);
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Operation timed out",
+            ))
+        }
+        _ => Err(io::Error::last_os_error()),
+    }
 }

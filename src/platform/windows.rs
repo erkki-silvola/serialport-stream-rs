@@ -85,7 +85,11 @@ impl PlatformStream {
         };
 
         if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!("Failed to open port {path} reason {err}"),
+            ));
         }
 
         let mut com = unsafe { COMPort::from_raw_handle(handle as RawHandle) };
@@ -110,7 +114,11 @@ impl PlatformStream {
         };
 
         if unsafe { SetCommTimeouts(handle, &timeouts) } == FALSE {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                err.kind(),
+                format!("SetCommTimeouts failed reason {err}"),
+            ));
         }
 
         let abort_event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };

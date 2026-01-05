@@ -100,10 +100,11 @@ impl PlatformStream {
             let _ = com.write_data_terminal_ready(dtr);
         }
 
+        // NOTE with jlinkcdc driver on windows 11 ReadTotalTimeoutMultiplier and ReadTotalTimeoutConstant needs to be max - 1
         let timeouts = COMMTIMEOUTS {
             ReadIntervalTimeout: u32::MAX,
-            ReadTotalTimeoutMultiplier: u32::MAX,
-            ReadTotalTimeoutConstant: u32::MAX,
+            ReadTotalTimeoutMultiplier: u32::MAX - 1,
+            ReadTotalTimeoutConstant: u32::MAX - 1,
             WriteTotalTimeoutMultiplier: u32::MAX,
             WriteTotalTimeoutConstant: u32::MAX,
         };
@@ -112,7 +113,7 @@ impl PlatformStream {
             return Err(io::Error::last_os_error());
         }
 
-        let abort_event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        let abort_event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
         if abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }

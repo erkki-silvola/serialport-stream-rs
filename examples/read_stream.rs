@@ -20,6 +20,7 @@ fn main() -> anyhow::Result<()> {
     let port_name = matches.value_of("port").unwrap();
     let baud_rate = matches.value_of("baud").unwrap().parse::<u32>().unwrap();
 
+    // note timeout only applies for sync api, but not on streaming as it is event based
     let stream = serialport_stream::new(port_name, baud_rate)
         .timeout(std::time::Duration::from_secs(1))
         .dtr_on_open(true)

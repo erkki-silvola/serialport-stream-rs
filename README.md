@@ -36,6 +36,28 @@ fn read_serial() -> std::io::Result<()> {
 }
 ```
 
+### Using with Tokio
+
+```rust
+use serialport_stream::new;
+use futures_lite::stream::StreamExt;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let mut stream = new("/dev/ttyUSB0", 9600)
+        .timeout(Duration::from_millis(100))
+        .open()?;
+
+    while let Some(result) = stream.next().await {
+        let data = result?;
+        println!("Received: {:?}", data);
+    }
+
+    Ok(())
+}
+```
+
 ### Synchronous Read/Write
 
 ```rust

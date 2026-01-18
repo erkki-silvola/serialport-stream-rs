@@ -286,62 +286,49 @@ fn receive_events(
     }
 
     loop {
-        // Check if abort was signaled
-        match unsafe { WaitForSingleObject(abort_event.0, 0) } {
-            WAIT_OBJECT_0 => {
-                // Aborted
-                return Ok(());
-            }
-            WAIT_TIMEOUT => {
-                let mut overlapped = Overlapped::new()?;
-                let mut mask: u32 = 0;
+        let mut overlapped = Overlapped::new()?;
+        let mut mask: u32 = 0;
 
-                assert_eq!(
-                    unsafe { WaitCommEvent(handle, &mut mask, overlapped.as_mut_ptr()) },
-                    0
-                );
+        assert_eq!(
+            unsafe { WaitCommEvent(handle, &mut mask, overlapped.as_mut_ptr()) },
+            0
+        );
 
-                if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    // Wait for either comm event or abort signal
-                    let objects = [overlapped.0.hEvent as HANDLE, abort_event.0];
+        if unsafe { GetLastError() } == ERROR_IO_PENDING {
+            // Wait for either comm event or abort signal
+            let objects = [overlapped.0.hEvent as HANDLE, abort_event.0];
 
-                    match unsafe {
-                        WaitForMultipleObjects(
-                            objects.len() as u32,
-                            objects.as_ptr(),
-                            0, // Wait for any
-                            INFINITE,
-                        )
-                    } {
-                        WAIT_OBJECT_0 => {
-                            // note could check if mask == 0, but still need to wait the object signal
-                            let mut len = 0;
-                            if unsafe {
-                                GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1)
-                            } == FALSE
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                            purge_pending_data(handle, &inner)?;
-                            continue;
-                        }
-                        val if val == WAIT_OBJECT_0 + 1 => {
-                            // Abort signaled
-                            let mut len = 0;
-                            cancel_io(handle, &mut overlapped, &mut len);
-                            return Ok(());
-                        }
-                        _ => {
-                            return Err(io::Error::last_os_error());
-                        }
+            match unsafe {
+                WaitForMultipleObjects(
+                    objects.len() as u32,
+                    objects.as_ptr(),
+                    0, // Wait for any
+                    INFINITE,
+                )
+            } {
+                WAIT_OBJECT_0 => {
+                    // note could check if mask == 0, but still need to wait the object signal
+                    let mut len = 0;
+                    if unsafe { GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1) }
+                        == FALSE
+                    {
+                        return Err(io::Error::last_os_error());
                     }
-                } else {
+                    purge_pending_data(handle, &inner)?;
+                    continue;
+                }
+                val if val == WAIT_OBJECT_0 + 1 => {
+                    // Abort signaled
+                    let mut len = 0;
+                    cancel_io(handle, &mut overlapped, &mut len);
+                    return Ok(());
+                }
+                _ => {
                     return Err(io::Error::last_os_error());
                 }
             }
-            _ => {
-                return Err(io::Error::last_os_error());
-            }
+        } else {
+            return Err(io::Error::last_os_error());
         }
     }
 }

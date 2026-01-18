@@ -1,39 +1,31 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Arg, Command};
 use futures_lite::stream::StreamExt;
 use serialport_stream::new;
 use std::time::Duration;
 
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct Args {
-    /// Serial port path (e.g., /dev/ttyUSB0 or COM3)
-    #[clap(short, long)]
-    port: String,
-
-    /// Baud rate
-    #[clap(short, long, default_value = "115200")]
-    baud: u32,
-
-    /// Timeout in milliseconds
-    #[clap(short, long, default_value = "1000")]
-    timeout: u64,
-
-    /// Enable DTR on open
-    #[clap(short, long)]
-    dtr: bool,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let matches = Command::new("Serialport stream example using tokio")
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("port")
+                .help("The device path to a serial port")
+                .use_value_delimiter(false)
+                .required(true),
+        )
+        .arg(Arg::new("baud").use_value_delimiter(false).required(true))
+        .get_matches();
 
-    println!("Opening serial port {} at {} baud", args.port, args.baud);
+    let port_name = matches.value_of("port").unwrap();
+    let baud_rate = matches.value_of("baud").unwrap().parse::<u32>().unwrap();
+
+    println!("Opening serial port {} at {} baud", port_name, baud_rate);
 
     // Create serial port stream with tokio runtime
-    let mut stream = new(&args.port, args.baud)
-        .timeout(Duration::from_millis(args.timeout))
-        .dtr_on_open(args.dtr)
+    let mut stream = new(port_name, baud_rate)
+        .timeout(Duration::from_millis(100))
+        .dtr_on_open(true)
         .open()?;
 
     println!("Serial port opened successfully");
@@ -49,17 +41,17 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             // Handle incoming data
-            result = stream.next() => {
+            result = stream.try_next() => {
                 match result {
-                    Some(Ok(data)) => {
+                    Ok(Some(data)) => {
                         println!("Received {} bytes", data.len());
                     }
-                    Some(Err(e)) => {
-                        eprintln!("poll next error: {}", e);
+                    Ok(None) => {
+                        println!("Stream ended");
                         break;
                     }
-                    None => {
-                        println!("Stream ended");
+                    Err(e) => {
+                        eprintln!("poll next error: {}", e);
                         break;
                     }
                 }
@@ -72,6 +64,5 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("Closing serial port");
     Ok(())
 }

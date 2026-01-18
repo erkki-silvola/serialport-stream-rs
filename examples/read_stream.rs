@@ -6,7 +6,7 @@ use futures::stream::Abortable;
 use futures_lite::stream;
 
 fn main() -> anyhow::Result<()> {
-    let matches = Command::new("Serialport Example - Receive Data")
+    let matches = Command::new("Serialport stream example basic usage")
         .disable_version_flag(true)
         .arg(
             Arg::new("port")

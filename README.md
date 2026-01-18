@@ -14,7 +14,7 @@ futures-lite = "2.0"
 
 ## Usage
 
-### Basic Streaming
+### Basic Usage
 
 ```rust
 use serialport_stream::{new, SerialPortStream};
@@ -22,7 +22,7 @@ use futures_lite::stream;
 
 fn read_serial() -> std::io::Result<()> {
     // Create a serial port stream using the builder API
-    let stream = serialport_stream::new("COM3", 115200)
+    let stream = new("COM3", 115200)
         .timeout(std::time::Duration::from_secs(1))
         .dtr_on_open(true)
         .open()?;
@@ -45,13 +45,12 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut stream = new("/dev/ttyUSB0", 9600)
+     let mut stream = new("/dev/ttyUSB0", 9600)
         .timeout(Duration::from_millis(100))
         .open()?;
 
-    while let Some(result) = stream.next().await {
-        let data = result?;
-        println!("Received: {:?}", data);
+    while let Ok(Some(result)) = stream.try_next().await {
+        println!("Received: {:?}", result);
     }
 
     Ok(())

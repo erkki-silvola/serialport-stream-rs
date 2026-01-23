@@ -47,6 +47,7 @@ struct HandleWrapper(HANDLE);
 unsafe impl Send for HandleWrapper {}
 unsafe impl Sync for HandleWrapper {}
 
+#[derive(Debug)]
 pub struct PlatformStream {
     thread_handle: Option<std::thread::JoinHandle<()>>,
     abort_event: HandleWrapper,

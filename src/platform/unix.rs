@@ -17,6 +17,7 @@ struct UnixInner {
     cancel_pipe: (OwnedFd, OwnedFd),
 }
 
+#[derive(Debug)]
 pub struct PlatformStream {
     thread_handle: Option<std::thread::JoinHandle<()>>,
     inner: Arc<EventsInner>,

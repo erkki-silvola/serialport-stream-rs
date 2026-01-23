@@ -1,7 +1,8 @@
 //! # serialport-stream
 //!
 //! A runtime-agnostic async stream wrapper for `serialport-rs` that provides efficient
-//! asynchronous serial port I/O using platform-specific mechanisms.
+//! asynchronous serial port using platform-specific I/O  mechanism. Produces 1-N amount of bytes depending on polling interval.
+//! Poll next will indefinitely wait for data, cancel or drop.
 //!
 
 use std::pin::Pin;
@@ -194,6 +195,7 @@ pub fn new<'a>(
 /// - Implements `std::io::Read` and `std::io::Write` for synchronous operations
 /// - Implements `futures::Stream` for asynchronous streaming of incoming data
 ///
+#[derive(Debug)]
 pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
@@ -212,7 +214,7 @@ impl SerialPortStream {
         self.platform.clear_break()
     }
 
-    fn try_poll_next(
+    pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {

@@ -1,6 +1,6 @@
 [package]
 name = "serialport-stream"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Erkki Silvola"]
 description = "Async TryStream wrapper for serialport-rs using platform-specific I/O"

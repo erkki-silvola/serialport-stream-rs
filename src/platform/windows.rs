@@ -256,6 +256,57 @@ impl PlatformStream {
         }
         Err(std::io::Error::other("Port not available"))
     }
+
+    pub fn write_request_to_send(&mut self, level: bool) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.write_request_to_send(level)?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn write_data_terminal_ready(&mut self, level: bool) -> std::io::Result<()> {
+        if let Some(ref mut port) = self.port {
+            port.write_data_terminal_ready(level)?;
+            return Ok(());
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn read_clear_to_send(&mut self) -> std::io::Result<bool> {
+        if let Some(ref mut port) = self.port {
+            return Ok(port.read_clear_to_send()?);
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn read_data_set_ready(&mut self) -> std::io::Result<bool> {
+        if let Some(ref mut port) = self.port {
+            return Ok(port.read_data_set_ready()?);
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn read_ring_indicator(&mut self) -> std::io::Result<bool> {
+        if let Some(ref mut port) = self.port {
+            return Ok(port.read_ring_indicator()?);
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn read_carrier_detect(&mut self) -> std::io::Result<bool> {
+        if let Some(ref mut port) = self.port {
+            return Ok(port.read_carrier_detect()?);
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
+
+    pub fn bytes_to_read(&self) -> std::io::Result<u32> {
+        if let Some(ref port) = self.port {
+            return Ok(port.bytes_to_read()?);
+        }
+        Err(std::io::Error::other("Port not available"))
+    }
 }
 
 impl Drop for PlatformStream {

@@ -1,8 +1,7 @@
 //! # serialport-stream
 //!
-//! A runtime-agnostic async stream wrapper for `serialport-rs` that provides efficient
-//! asynchronous serial port using platform-specific I/O  mechanism. Produces 1-N amount of bytes depending on polling interval.
-//! Poll next will indefinitely wait for data, cancel or drop.
+//! Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
+//! Produces 1-N amount of bytes depending on polling interval. Poll next will indefinitely wait for data in event, error or drop.
 //!
 
 use std::pin::Pin;
@@ -212,6 +211,34 @@ impl SerialPortStream {
 
     pub fn clear_break(&mut self) -> std::io::Result<()> {
         self.platform.clear_break()
+    }
+
+    pub fn write_request_to_send(&mut self, level: bool) -> std::io::Result<()> {
+        self.platform.write_request_to_send(level)
+    }
+
+    pub fn write_data_terminal_ready(&mut self, level: bool) -> std::io::Result<()> {
+        self.platform.write_data_terminal_ready(level)
+    }
+
+    pub fn read_clear_to_send(&mut self) -> std::io::Result<bool> {
+        self.platform.read_clear_to_send()
+    }
+
+    pub fn read_data_set_ready(&mut self) -> std::io::Result<bool> {
+        self.platform.read_data_set_ready()
+    }
+
+    pub fn read_ring_indicator(&mut self) -> std::io::Result<bool> {
+        self.platform.read_ring_indicator()
+    }
+
+    pub fn read_carrier_detect(&mut self) -> std::io::Result<bool> {
+        self.platform.read_carrier_detect()
+    }
+
+    pub fn bytes_to_read(&self) -> std::io::Result<u32> {
+        self.platform.bytes_to_read()
     }
 
     pub fn try_poll_next(

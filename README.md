@@ -1,6 +1,7 @@
 # serialport-stream-rs
 
-A runtime-agnostic async stream wrapper for [serialport-rs](https://github.com/serialport/serialport-rs) that implements `futures::Stream` using platform-specific I/O mechanism. Produces 1-N amount of bytes depending on polling interval. Poll next will indefinitely wait for data, error, cancel or drop.
+Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
+Produces 1-N amount of bytes depending on polling interval. Poll next will indefinitely wait for data in event, error or drop.
 
 ## Installation
 

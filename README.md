@@ -9,7 +9,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-serialport-stream = "0.1"
+serialport-stream = "0.1.4"
 futures-lite = "2.0"
 ```
 

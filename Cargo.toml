@@ -1,6 +1,6 @@
 [package]
 name = "serialport-stream"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Erkki Silvola"]
 description = "Async TryStream wrapper for serialport-rs using platform-specific I/O"
@@ -12,7 +12,7 @@ categories = ["asynchronous", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-serialport = "4.8.1"
+serialport = "4.7.3"
 futures = { version = "0.3", features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -267,6 +267,10 @@ impl SerialPortStream {
     }
 }
 
+unsafe impl Send for SerialPortStream {}
+
+unsafe impl Sync for SerialPortStream {}
+
 impl std::io::Read for SerialPortStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.platform.read(buf)

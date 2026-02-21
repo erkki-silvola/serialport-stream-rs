@@ -1,7 +1,7 @@
 # serialport-stream-rs
 
 Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
-Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop. Synchronous API is not available after first poll on stream, and will give error. There is no backpressure handling, will indefinitely buffer the data.
+Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop. Synchronous API is not available after first poll on stream. There is no backpressure handling, will indefinitely buffer the data.
 
 ## Installation
 

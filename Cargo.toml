@@ -12,7 +12,7 @@ categories = ["asynchronous", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-serialport = "4.7.3"
+serialport = "4.9.0"
 futures = { version = "0.3", features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]

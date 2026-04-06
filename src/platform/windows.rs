@@ -107,11 +107,11 @@ impl PlatformStream {
 
         // NOTE with jlinkcdc driver on windows 11 ReadTotalTimeoutMultiplier and ReadTotalTimeoutConstant needs to be max - 1
         let timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: u32::MAX,
-            ReadTotalTimeoutMultiplier: u32::MAX - 1,
-            ReadTotalTimeoutConstant: u32::MAX - 1,
-            WriteTotalTimeoutMultiplier: u32::MAX,
-            WriteTotalTimeoutConstant: u32::MAX,
+            ReadIntervalTimeout: 0,
+            ReadTotalTimeoutMultiplier: u32::MAX,
+            ReadTotalTimeoutConstant: u32::MAX,
+            WriteTotalTimeoutMultiplier: 0,
+            WriteTotalTimeoutConstant: 0,
         };
 
         if unsafe { SetCommTimeouts(handle, &timeouts) } == FALSE {
@@ -141,7 +141,63 @@ impl PlatformStream {
         if let Some(ref mut port) = self.port {
             let handle = port.as_raw_handle();
 
-            let mut len = 0;
+            // Only wait for comm event when no data is already available
+            if self.bytes_to_read()? == 0 {
+                if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
+                    return Err(io::Error::last_os_error());
+                }
+
+                let mut wait_overlapped = Overlapped::new()?;
+                let mut mask: u32 = 0;
+
+                if unsafe { WaitCommEvent(handle, &mut mask, wait_overlapped.as_mut_ptr()) } == FALSE
+                {
+                    match unsafe { GetLastError() } {
+                        ERROR_IO_PENDING => {
+                            let timeout_ms = self.timeout.as_millis() as u32;
+                            match unsafe {
+                                WaitForSingleObject(wait_overlapped.0.hEvent as HANDLE, timeout_ms)
+                            } as u32
+                            {
+                                WAIT_OBJECT_0 => {
+                                    let mut len = 0;
+                                    if unsafe {
+                                        GetOverlappedResult(
+                                            handle,
+                                            wait_overlapped.as_mut_ptr(),
+                                            &mut len,
+                                            TRUE,
+                                        )
+                                    } == FALSE
+                                    {
+                                        return Err(io::Error::last_os_error());
+                                    }
+                                }
+                                WAIT_TIMEOUT => {
+                                    let mut len = 0;
+                                    unsafe { CancelIo(handle) };
+                                    let _ = unsafe {
+                                        GetOverlappedResult(
+                                            handle,
+                                            wait_overlapped.as_mut_ptr(),
+                                            &mut len,
+                                            TRUE,
+                                        )
+                                    };
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "Operation timed out",
+                                    ));
+                                }
+                                _ => return Err(io::Error::last_os_error()),
+                            }
+                        }
+                        _ => return Err(io::Error::last_os_error()),
+                    }
+                }
+            }
+
+            let mut len = self.bytes_to_read()?;
 
             let mut overlapped = Overlapped::new()?;
 
@@ -155,11 +211,12 @@ impl PlatformStream {
                 )
             } {
                 FALSE => match unsafe { GetLastError() } {
-                    ERROR_IO_PENDING => {
-                        let timeout = self.timeout.as_millis() as u32;
-                        return overlapped_timed(timeout, handle, &mut overlapped);
-                    }
-                    _ => return Err(io::Error::last_os_error()),
+                    assert!(false);
+                    // ERROR_IO_PENDING => {
+                    //     let timeout = self.timeout.as_millis() as u32;
+                    //     return overlapped_timed(timeout, handle, &mut overlapped);
+                    // }
+                    // _ => return Err(io::Error::last_os_error()),
                 },
                 _ => {
                     return Ok(len as usize);

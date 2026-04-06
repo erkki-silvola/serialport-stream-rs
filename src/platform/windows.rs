@@ -141,8 +141,10 @@ impl PlatformStream {
         if let Some(ref mut port) = self.port {
             let handle = port.as_raw_handle();
 
+            let mut len = self.bytes_to_read()?;
+
             // Only wait for comm event when no data is already available
-            if self.bytes_to_read()? == 0 {
+            if len == 0 {
                 if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
                     return Err(io::Error::last_os_error());
                 }
@@ -150,7 +152,8 @@ impl PlatformStream {
                 let mut wait_overlapped = Overlapped::new()?;
                 let mut mask: u32 = 0;
 
-                if unsafe { WaitCommEvent(handle, &mut mask, wait_overlapped.as_mut_ptr()) } == FALSE
+                if unsafe { WaitCommEvent(handle, &mut mask, wait_overlapped.as_mut_ptr()) }
+                    == FALSE
                 {
                     match unsafe { GetLastError() } {
                         ERROR_IO_PENDING => {
@@ -160,7 +163,6 @@ impl PlatformStream {
                             } as u32
                             {
                                 WAIT_OBJECT_0 => {
-                                    let mut len = 0;
                                     if unsafe {
                                         GetOverlappedResult(
                                             handle,
@@ -174,7 +176,6 @@ impl PlatformStream {
                                     }
                                 }
                                 WAIT_TIMEOUT => {
-                                    let mut len = 0;
                                     unsafe { CancelIo(handle) };
                                     let _ = unsafe {
                                         GetOverlappedResult(
@@ -197,27 +198,20 @@ impl PlatformStream {
                 }
             }
 
-            let mut len = self.bytes_to_read()?;
-
             let mut overlapped = Overlapped::new()?;
 
             match unsafe {
                 ReadFile(
                     handle,
                     buf.as_mut_ptr(),
-                    buf.len() as u32,
+                    len,
                     &mut len,
                     &mut overlapped.0,
                 )
             } {
-                FALSE => match unsafe { GetLastError() } {
-                    assert!(false);
-                    // ERROR_IO_PENDING => {
-                    //     let timeout = self.timeout.as_millis() as u32;
-                    //     return overlapped_timed(timeout, handle, &mut overlapped);
-                    // }
-                    // _ => return Err(io::Error::last_os_error()),
-                },
+                FALSE => {
+                    panic!("ReadFile FALSE");
+                }
                 _ => {
                     return Ok(len as usize);
                 }

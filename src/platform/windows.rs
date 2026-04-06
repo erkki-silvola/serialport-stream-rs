@@ -176,7 +176,7 @@ impl PlatformStream {
                                     }
                                 }
                                 WAIT_TIMEOUT => {
-                                    cancel_io(handle, wait_overlapped, &mut len);
+                                    cancel_io(handle, &mut wait_overlapped, &mut len);
                                     return Err(io::Error::new(
                                         io::ErrorKind::TimedOut,
                                         "Operation timed out",
@@ -199,12 +199,7 @@ impl PlatformStream {
                     {
                         WAIT_OBJECT_0 => {
                             if unsafe {
-                                GetOverlappedResult(
-                                    handle,
-                                    wait_overlapped.as_mut_ptr(),
-                                    &mut len,
-                                    TRUE,
-                                )
+                                GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, TRUE)
                             } == FALSE
                             {
                                 return Err(io::Error::last_os_error());
@@ -248,19 +243,19 @@ impl PlatformStream {
                                     GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
                                 } == TRUE
                                 {
-                                    Ok(len as usize)
+                                    return Ok(len as usize);
                                 } else {
-                                    Err(io::Error::last_os_error())
+                                    return Err(io::Error::last_os_error());
                                 }
                             }
                             WAIT_TIMEOUT => {
-                                cancel_io(handle, overlapped, &mut len);
-                                Err(io::Error::new(
+                                cancel_io(handle, &mut overlapped, &mut len);
+                                return Err(io::Error::new(
                                     io::ErrorKind::TimedOut,
                                     "Operation timed out",
-                                ))
+                                ));
                             }
-                            _ => Err(io::Error::last_os_error()),
+                            _ => return Err(io::Error::last_os_error()),
                         }
                     }
                     _ => return Err(io::Error::last_os_error()),

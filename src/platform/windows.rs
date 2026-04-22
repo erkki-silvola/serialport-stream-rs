@@ -190,6 +190,8 @@ impl PlatformStream {
                 }
             }
 
+            len = len.min(buf.len());
+
             let mut overlapped = Overlapped::new()?;
 
             match unsafe { ReadFile(handle, buf.as_mut_ptr(), len, &mut len, &mut overlapped.0) } {
@@ -503,10 +505,6 @@ fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()
 }
 
 fn cancel_io(handle: HANDLE, overlapped: &mut Overlapped, len: &mut u32) {
-    assert_eq!(unsafe { CancelIo(handle) }, TRUE);
-    assert_eq!(
-        unsafe { GetOverlappedResult(handle, &overlapped.0, len, TRUE,) },
-        FALSE
-    );
-    assert_eq!(*len, 0);
+    let _ = unsafe { CancelIo(handle) };
+    let _ = unsafe { GetOverlappedResult(handle, &overlapped.0, len, TRUE) };
 }

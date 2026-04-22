@@ -11,6 +11,8 @@ use std::time::Duration;
 
 mod platform;
 
+pub mod line_settings;
+
 use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
 

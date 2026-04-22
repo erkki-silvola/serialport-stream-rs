@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-04-22
+
+##### Added
+
+* `line_settings` module with helpers for mapping data bits, stop bits, parity, and flow control from primitive values.
+
+##### Fixed
+
+* Windows error handling improvements.
+* Windows build fix.
+
 ## [0.1.7] - 2026-04-06
 
 ##### Changed

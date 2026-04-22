@@ -190,7 +190,7 @@ impl PlatformStream {
                 }
             }
 
-            len = len.min(buf.len());
+            len = len.min(buf.len() as u32);
 
             let mut overlapped = Overlapped::new()?;
 

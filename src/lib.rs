@@ -279,10 +279,7 @@ impl AsyncRead for SerialPortStream {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
+        assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
         match this.poll_receiver_ready(cx) {
             Poll::Pending => Poll::Pending,

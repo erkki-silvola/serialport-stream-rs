@@ -58,30 +58,23 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-                    biased;
+            biased;
 
-                    _ = &mut ctrl_c => {
-                        println!("\nCtrl+C — exiting");
+            _ = &mut ctrl_c => {
+                println!("\nCtrl+C — exiting");
+                break;
+            }
+
+            res = stream.read(&mut buf) => {
+                match res {
+                    Ok(n) =>  println!("read {} bytes: {:?}", n, &buf[..n]),
+                    Err(e) => {
+                        eprintln!("read error: {e}");
                         break;
                     }
-
-                    res = stream.read(&mut buf) => {
-                        match res {
-                            Ok(0) => {
-                                println!("read returned 0 bytes");
-                                break;
-                            }
-                            Ok(n) => {
-        //                        std::thread::sleep(std::time::Duration::from_millis(300));
-                                println!("read {} bytes: {:?}", n, &buf[..n]);
-                            }
-                            Err(e) => {
-                                eprintln!("read error: {e}");
-                                break;
-                            }
-                        }
-                    }
                 }
+            }
+        }
     }
 
     Ok(())

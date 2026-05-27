@@ -22,9 +22,7 @@ async fn main() -> Result<()> {
     println!("Opening serial port {} at {} baud", port_name, baud_rate);
 
     // Create serial port stream with tokio runtime
-    let mut stream = new(port_name, baud_rate)
-        .dtr_on_open(true)
-        .open()?;
+    let mut stream = new(port_name, baud_rate).dtr_on_open(true).open()?;
 
     println!("Serial port opened successfully");
 

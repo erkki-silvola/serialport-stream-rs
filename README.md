@@ -55,6 +55,8 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+`AsyncRead` works the same way: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200` ([`examples/tokio_async_read.rs`](examples/tokio_async_read.rs)).
+
 ### Asynchronous byte reads (`AsyncRead`)
 
 The stream implements [`futures::io::AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html). Combine it with [`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) for helpers such as `read` and `read_to_end`. Data comes from the same internal buffer as `futures::Stream`; use one primary read style per open stream.

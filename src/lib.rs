@@ -296,11 +296,13 @@ impl AsyncRead for SerialPortStream {
                 buf[..n].copy_from_slice(&buffer[..n]);
                 buffer.drain(..n);
                 let cached_bytes = buffer.len();
-                tracing::info!(
-                    read_bytes = n,
-                    cached_bytes,
-                    "serialport-stream receive buffer after AsyncRead read"
-                );
+                if cached_bytes > 0 {
+                    tracing::info!(
+                        read_bytes = n,
+                        cached_bytes,
+                        "serialport-stream receive buffer after AsyncRead read"
+                    );
+                }
                 Poll::Ready(Ok(n))
             }
         }

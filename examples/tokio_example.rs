@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::{Arg, Command};
 use futures_lite::stream::StreamExt;
 use serialport_stream::new;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,7 +23,6 @@ async fn main() -> Result<()> {
 
     // Create serial port stream with tokio runtime
     let mut stream = new(port_name, baud_rate)
-        .timeout(Duration::from_millis(100))
         .dtr_on_open(true)
         .open()?;
 

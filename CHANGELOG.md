@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-27
+
+##### Added
+
+* `futures::io::AsyncRead` for `SerialPortStream`, sharing the receive thread buffer with `futures::Stream`.
+* Re-export `futures::io::AsyncRead` and `AsyncReadExt`.
+
+##### Removed
+
+* Builder `.timeout` on `SerialPortStreamBuilder`; read timeout is no longer configured when opening the port (serialport-rs defaults apply on Unix).
+* `std::io::Read` and `std::io::Write` / `flush` on `SerialPortStream`. Incoming data is via `futures::Stream` or `futures::io::AsyncRead` only.
+
 ## [0.1.8] - 2026-04-22
 
 ##### Added

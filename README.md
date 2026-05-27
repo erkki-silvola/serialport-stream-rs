@@ -1,7 +1,7 @@
 # serialport-stream-rs
 
 Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
-Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop. Synchronous API is not available after first poll on stream. There is no backpressure handling, will indefinitely buffer the data.
+Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop. Incoming data is only available via `futures::Stream` or `futures::io::AsyncRead` (no `std::io::Read` on this stream). To transmit payloads, open a separate handle with `serialport` or split your design accordingly. There is no backpressure handling; the crate will buffer incoming data indefinitely.
 
 ## Installation
 
@@ -9,7 +9,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-serialport-stream = "0.1.8"
+serialport-stream = "0.2.0"
 futures-lite = "2.0"
 ```
 
@@ -24,7 +24,6 @@ use futures_lite::stream;
 fn read_serial() -> std::io::Result<()> {
     // Create a serial port stream using the builder API
     let stream = new("COM3", 115200)
-        .timeout(std::time::Duration::from_secs(1))
         .dtr_on_open(true)
         .open()?;
 
@@ -42,12 +41,10 @@ fn read_serial() -> std::io::Result<()> {
 ```rust
 use serialport_stream::new;
 use futures_lite::stream::StreamExt;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
      let mut stream = new("/dev/ttyUSB0", 9600)
-        .timeout(Duration::from_millis(100))
         .open()?;
 
     while let Ok(Some(result)) = stream.try_next().await {
@@ -58,22 +55,11 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-### Synchronous Read/Write
+### Asynchronous byte reads (`AsyncRead`)
 
-```rust
-use std::io::{Read, Write};
+The stream implements [`futures::io::AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html). Combine it with [`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) for helpers such as `read` and `read_to_end`. Data comes from the same internal buffer as `futures::Stream`; use one primary read style per open stream.
 
-let mut stream = new("/dev/ttyUSB0", 9600).open()?;
-
-// Write data synchronously
-stream.write_all(b"Hello, serial port!\n")?;
-stream.flush()?;
-
-// Read data synchronously
-let mut buffer = [0u8; 1024];
-let n = stream.read(&mut buffer)?;
-println!("Read {} bytes", n);
-```
+For Tokio’s `tokio::io::AsyncRead`, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) (add `tokio-util` with the `compat` feature to your crate).
 
 ## API Overview
 
@@ -84,16 +70,14 @@ println!("Read {} bytes", n);
 - `.flow_control(FlowControl)` - Set flow control (None, Software, Hardware)
 - `.parity(Parity)` - Set parity (None, Odd, Even)
 - `.stop_bits(StopBits)` - Set stop bits (One, Two)
-- `.timeout(Duration)` - Set read/write timeout
 - `.dtr_on_open(bool)` - Control DTR signal on open
 - `.open()` - Open the port and create the stream
 
 ### SerialPortStream Methods
 
-- Implements `std::io::Read` - Synchronous reading
-- Implements `std::io::Write` - Synchronous writing
-- Implements `futures::Stream` - Asynchronous streaming
-- Item type: `Result<Vec<u8>, std::io::Error>`
+- Implements `futures::Stream` — asynchronous streaming (`Result<Vec<u8>, io::Error>` items)
+- Implements `futures::io::AsyncRead` — partial reads from the same receive FIFO; re-exported with `AsyncReadExt`
+- Other methods expose serial control lines (`write_request_to_send`, modem status reads, buffers, breaks, etc.)
 
 ## License
 

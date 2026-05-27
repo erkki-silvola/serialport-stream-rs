@@ -2,12 +2,12 @@
 //!
 //! Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
 //! Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop.
+//! Bytes are read only via `futures::Stream` or `futures::io::AsyncRead`, not `std::io::Read`.
 //!
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 mod platform;
 
@@ -16,6 +16,7 @@ pub mod line_settings;
 use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
 
+pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::stream::{Stream, TryStreamExt};
 pub use serialport;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -47,7 +48,6 @@ impl EventsInner {
 /// ```no_run
 /// use serialport_stream::new;
 /// use serialport::{DataBits, Parity, StopBits, FlowControl};
-/// use std::time::Duration;
 ///
 /// # fn example() -> std::io::Result<()> {
 /// let stream = new("/dev/ttyUSB0", 115200)
@@ -55,7 +55,6 @@ impl EventsInner {
 ///     .parity(Parity::None)
 ///     .stop_bits(StopBits::One)
 ///     .flow_control(FlowControl::None)
-///     .timeout(Duration::from_millis(100))
 ///     .open()?;
 /// # Ok(())
 /// # }
@@ -68,7 +67,6 @@ pub struct SerialPortStreamBuilder {
     pub(crate) flow_control: FlowControl,
     pub(crate) parity: Parity,
     pub(crate) stop_bits: StopBits,
-    pub(crate) timeout: Duration,
     pub(crate) dtr_on_open: Option<bool>,
 }
 
@@ -130,15 +128,6 @@ impl SerialPortStreamBuilder {
         self
     }
 
-    /// Sets the timeout for read and write operations.
-    ///
-    /// Default: `Duration::from_millis(0)` (non-blocking)
-    #[must_use]
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
     /// Sets the DTR (Data Terminal Ready) signal state when opening the port.
     ///
     /// If not called, the DTR state is preserved from the previous port state.
@@ -185,16 +174,17 @@ pub fn new<'a>(
         flow_control: FlowControl::None,
         parity: Parity::None,
         stop_bits: StopBits::One,
-        timeout: Duration::from_millis(0),
         dtr_on_open: None,
     }
 }
 
 /// An async stream for reading from a serial port.
 ///
-/// This struct provides both synchronous and asynchronous I/O on a serial port:
-/// - Implements `std::io::Read` and `std::io::Write` for synchronous operations
+/// This struct exposes asynchronous ingress and synchronous control lines on the port:
 /// - Implements `futures::Stream` for asynchronous streaming of incoming data
+/// - Implements `futures::io::AsyncRead` for byte-oriented async reads from the same receive buffer
+///
+/// `Stream` and `AsyncRead` both consume the same FIFO; pick one primary mode for a given stream.
 ///
 #[derive(Debug)]
 pub struct SerialPortStream {
@@ -243,14 +233,11 @@ impl SerialPortStream {
         self.platform.bytes_to_read()
     }
 
-    pub fn try_poll_next(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+    fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.inner.waker.register(cx.waker());
 
         if let Some(err) = self.inner.stream_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Some(Err(std::io::Error::new(err.kind(), err.to_string()))));
+            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
         }
 
         if !self.platform.is_thread_started() {
@@ -258,14 +245,27 @@ impl SerialPortStream {
             return Poll::Pending;
         }
 
-        let mut buffer = self.inner.in_buffer.lock().unwrap();
-        if !buffer.is_empty() {
-            // Drain all available data
-            let data = buffer.drain(..).collect();
-            return Poll::Ready(Some(Ok(data)));
-        }
+        Poll::Ready(Ok(()))
+    }
 
-        Poll::Pending
+    pub fn try_poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+        match self.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = self.inner.in_buffer.lock().unwrap();
+                if !buffer.is_empty() {
+                    // Drain all available data
+                    let data = buffer.drain(..).collect();
+                    return Poll::Ready(Some(Ok(data)));
+                }
+
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -273,19 +273,37 @@ unsafe impl Send for SerialPortStream {}
 
 unsafe impl Sync for SerialPortStream {}
 
-impl std::io::Read for SerialPortStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.platform.read(buf)
-    }
-}
+impl AsyncRead for SerialPortStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
 
-impl std::io::Write for SerialPortStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.platform.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.platform.flush()
+        let this = self.as_mut().get_mut();
+        match this.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = this.inner.in_buffer.lock().unwrap();
+                if buffer.is_empty() {
+                    return Poll::Pending;
+                }
+                let n = buf.len().min(buffer.len());
+                buf[..n].copy_from_slice(&buffer[..n]);
+                buffer.drain(..n);
+                let cached_bytes = buffer.len();
+                tracing::info!(
+                    read_bytes = n,
+                    cached_bytes,
+                    "serialport-stream receive buffer after AsyncRead read"
+                );
+                Poll::Ready(Ok(n))
+            }
+        }
     }
 }
 

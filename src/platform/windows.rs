@@ -53,16 +53,10 @@ pub struct PlatformStream {
     abort_event: HandleWrapper,
     inner: Arc<EventsInner>,
     port: Option<serialport::COMPort>,
-    timeout: std::time::Duration,
 }
 
 impl PlatformStream {
     pub fn new(builder: SerialPortStreamBuilder, inner: Arc<EventsInner>) -> io::Result<Self> {
-        if builder.timeout.as_millis() >= u32::MAX as u128 {
-            return Err(std::io::Error::other(
-                "Invalid timeout value greater than MAX u32",
-            ));
-        }
         let path = builder.path;
         let mut name = Vec::<u16>::with_capacity(4 + path.len() + 1);
 
@@ -133,151 +127,7 @@ impl PlatformStream {
             abort_event,
             inner,
             port: Some(com),
-            timeout: builder.timeout,
         })
-    }
-
-    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(ref mut port) = self.port {
-            let handle = port.as_raw_handle();
-
-            let mut len = self.bytes_to_read()?;
-
-            // Only wait for comm event when no data is already available
-            if len == 0 {
-                if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
-                    return Err(io::Error::last_os_error());
-                }
-
-                let mut wait_overlapped = Overlapped::new()?;
-                let mut mask: u32 = 0;
-
-                if unsafe { WaitCommEvent(handle, &mut mask, wait_overlapped.as_mut_ptr()) }
-                    == FALSE
-                {
-                    match unsafe { GetLastError() } {
-                        ERROR_IO_PENDING => {
-                            let timeout_ms = self.timeout.as_millis() as u32;
-                            match unsafe {
-                                WaitForSingleObject(wait_overlapped.0.hEvent as HANDLE, timeout_ms)
-                            } as u32
-                            {
-                                WAIT_OBJECT_0 => {
-                                    if unsafe {
-                                        GetOverlappedResult(
-                                            handle,
-                                            wait_overlapped.as_mut_ptr(),
-                                            &mut len,
-                                            TRUE,
-                                        )
-                                    } == FALSE
-                                    {
-                                        return Err(io::Error::last_os_error());
-                                    }
-                                }
-                                WAIT_TIMEOUT => {
-                                    cancel_io(handle, &mut wait_overlapped, &mut len);
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::TimedOut,
-                                        "Operation timed out",
-                                    ));
-                                }
-                                _ => return Err(io::Error::last_os_error()),
-                            }
-                        }
-                        _ => return Err(io::Error::last_os_error()),
-                    }
-                }
-            }
-
-            len = len.min(buf.len() as u32);
-
-            let mut overlapped = Overlapped::new()?;
-
-            match unsafe { ReadFile(handle, buf.as_mut_ptr(), len, &mut len, &mut overlapped.0) } {
-                FALSE => {
-                    match unsafe { WaitForSingleObject(overlapped.0.hEvent as HANDLE, INFINITE) }
-                        as u32
-                    {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, TRUE)
-                            } == FALSE
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                            return Ok(len as usize);
-                        }
-                        _ => return Err(io::Error::last_os_error()),
-                    }
-                }
-                _ => {
-                    return Ok(len as usize);
-                }
-            }
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(ref mut port) = self.port {
-            let handle = port.as_raw_handle();
-
-            let mut len = 0;
-
-            let mut overlapped = Overlapped::new()?;
-
-            match unsafe {
-                WriteFile(
-                    handle,
-                    buf.as_ptr(),
-                    buf.len() as u32,
-                    &mut len,
-                    &mut overlapped.0,
-                )
-            } {
-                FALSE => match unsafe { GetLastError() } {
-                    ERROR_IO_PENDING => {
-                        let timeout = self.timeout.as_millis() as u32;
-                        match unsafe { WaitForSingleObject(overlapped.0.hEvent, timeout) } as u32 {
-                            WAIT_OBJECT_0 => {
-                                if unsafe {
-                                    GetOverlappedResult(handle, &overlapped.0, &mut len, TRUE)
-                                } == TRUE
-                                {
-                                    return Ok(len as usize);
-                                } else {
-                                    return Err(io::Error::last_os_error());
-                                }
-                            }
-                            WAIT_TIMEOUT => {
-                                cancel_io(handle, &mut overlapped, &mut len);
-                                return Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "Operation timed out",
-                                ));
-                            }
-                            _ => return Err(io::Error::last_os_error()),
-                        }
-                    }
-                    _ => return Err(io::Error::last_os_error()),
-                },
-                _ => return Ok(len as usize),
-            }
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn flush(&mut self) -> io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            let handle = port.as_raw_handle();
-
-            match unsafe { FlushFileBuffers(handle) } {
-                0 => return Err(io::Error::last_os_error()),
-                _ => return Ok(()),
-            }
-        }
-        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn is_thread_started(&self) -> bool {

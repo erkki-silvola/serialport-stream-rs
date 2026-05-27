@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::io::Write;
 use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -43,7 +42,6 @@ impl PlatformStream {
         inner: Arc<EventsInner>,
     ) -> Result<Self, std::io::Error> {
         let serialport_builder = serialport::new(builder.path, builder.baud_rate)
-            .timeout(builder.timeout)
             .data_bits(builder.data_bits)
             .flow_control(builder.flow_control)
             .parity(builder.parity)
@@ -83,20 +81,6 @@ impl PlatformStream {
             }
         }));
         rx.recv().expect("Failed to start thread");
-    }
-
-    pub fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(ref mut port) = self.port {
-            return port.read(buf);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Some(ref mut port) = self.port {
-            return port.write(buf);
-        }
-        Err(std::io::Error::other("Port not available"))
     }
 
     fn receive_thread(
@@ -148,14 +132,6 @@ impl PlatformStream {
                 }
             }
         }
-    }
-
-    pub fn flush(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.flush()?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
     }
 
     pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {

@@ -1,7 +1,8 @@
 # serialport-stream-rs
 
-Pure event driven implementation of futures::Stream for reading data from serialport utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
-Produces 1-N amount of bytes depending on polling interval. Initial poll starts background thread which will indefinitely wait for data in event, error or drop. Incoming data is only available via `futures::Stream` or `futures::io::AsyncRead` (no `std::io::Read` on this stream). To transmit payloads, open a separate handle with `serialport` or split your design accordingly. There is no backpressure handling; the crate will buffer incoming data indefinitely.
+Implements `futures::Stream` and `futures::io::AsyncRead` utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
+Initial poll starts background thread which will indefinitely wait for data in event, error or drop.
+There is no backpressure handling; the crate will buffer incoming data indefinitely.
 
 ## Installation
 

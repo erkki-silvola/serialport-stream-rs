@@ -1,5 +1,4 @@
 use std::io;
-use std::os::windows::prelude::*;
 use std::sync::Arc;
 use std::{mem::MaybeUninit, ptr};
 use windows_sys::Win32::Devices::Communication::*;
@@ -8,10 +7,9 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::IO::*;
 
-use serialport::COMPort;
-use serialport::SerialPort;
-
 use crate::{EventsInner, EventsInnerWrite, PendingWrite, SerialPortStreamBuilder};
+
+mod comm;
 
 /// OVERLAPPED wrapper that manages the event handle
 struct Overlapped(OVERLAPPED);
@@ -61,13 +59,12 @@ pub struct PlatformStream {
     inner: Arc<EventsInner>,
     write_inner: Arc<EventsInnerWrite>,
     windows_inner: WindowsInner,
-    port: Option<serialport::COMPort>,
+    port: Option<HandleWrapper>,
 }
 
 impl PlatformStream {
     fn port_handle(&self) -> HandleWrapper {
-        let port = self.port.as_ref().expect("port not available");
-        HandleWrapper(port.as_raw_handle() as HANDLE)
+        self.port.as_ref().expect("port not available").clone()
     }
 
     pub fn new(
@@ -75,7 +72,7 @@ impl PlatformStream {
         inner: Arc<EventsInner>,
         write_inner: Arc<EventsInnerWrite>,
     ) -> io::Result<Self> {
-        let path = builder.path;
+        let path = &builder.path;
         let mut name = Vec::<u16>::with_capacity(4 + path.len() + 1);
 
         if !path.starts_with('\\') {
@@ -105,16 +102,10 @@ impl PlatformStream {
             ));
         }
 
-        let mut com = unsafe { COMPort::from_raw_handle(handle as RawHandle) };
+        comm::configure_port(handle, &builder)?;
 
-        com.set_baud_rate(builder.baud_rate)?;
-        com.set_data_bits(builder.data_bits)?;
-        com.set_parity(builder.parity)?;
-        com.set_stop_bits(builder.stop_bits)?;
-        com.set_flow_control(builder.flow_control)?;
-
-        if let Some(dtr) = builder.dtr_on_open {
-            let _ = com.write_data_terminal_ready(dtr);
+        if let Some(buffer) = builder.clear_buffer {
+            comm::clear(handle, buffer)?;
         }
 
         // NOTE with jlinkcdc driver on windows 11 ReadTotalTimeoutMultiplier and ReadTotalTimeoutConstant needs to be max - 1
@@ -160,7 +151,7 @@ impl PlatformStream {
                 write_signal_event: HandleWrapper(write_signal_event),
                 write_abort_event: HandleWrapper(write_abort_event),
             },
-            port: Some(com),
+            port: Some(HandleWrapper(handle)),
         })
     }
 
@@ -216,81 +207,6 @@ impl PlatformStream {
 
     pub fn signal_write(&self) {
         assert_eq!(unsafe { SetEvent(self.windows_inner.write_signal_event.0) }, TRUE);
-    }
-
-    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.clear(buffer_to_clear)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn set_break(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.set_break()?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn clear_break(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.clear_break()?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write_request_to_send(&mut self, level: bool) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.write_request_to_send(level)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write_data_terminal_ready(&mut self, level: bool) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.write_data_terminal_ready(level)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_clear_to_send(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_clear_to_send()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_data_set_ready(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_data_set_ready()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_ring_indicator(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_ring_indicator()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_carrier_detect(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_carrier_detect()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn bytes_to_read(&self) -> std::io::Result<u32> {
-        if let Some(ref port) = self.port {
-            return Ok(port.bytes_to_read()?);
-        }
-        Err(std::io::Error::other("Port not available"))
     }
 
     fn receive_events(
@@ -520,6 +436,9 @@ impl Drop for PlatformStream {
             CloseHandle(self.abort_event.0);
             CloseHandle(self.windows_inner.write_signal_event.0);
             CloseHandle(self.windows_inner.write_abort_event.0);
+            if let Some(port) = self.port.take() {
+                CloseHandle(port.0);
+            }
         }
     }
 }

@@ -1,7 +1,61 @@
 //! # serialport-stream
 //!
-//! Implements `futures::Stream` and `futures::io::AsyncRead` utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
-//! Initial poll starts background thread which will indefinitely wait for data in event, error or drop.
+//! Async serial port I/O using [`futures`]: [`Stream`], [`AsyncRead`], and [`AsyncWrite`].
+//!
+//! Open and configure ports with [`SerialPortStreamBuilder`] via [`new`]. Line settings, DTR on
+//! open, and buffer clearing are applied when the port is opened; [`SerialPortStream`] then
+//! exposes only async read and write traits.
+//!
+//! Configuration types ([`DataBits`], [`Parity`], etc.) follow the naming and semantics of
+//! [serialport](https://crates.io/crates/serialport) (serialport-rs). This crate is inspired by
+//! that API but is a separate implementation focused on async [`futures`] I/O.
+//!
+//! ## Platform I/O
+//!
+//! POSIX `termios` and `ioctl` on Unix; Win32 COMM APIs on Windows. Configuration types
+//! ([`DataBits`], [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) live in this crate.
+//!
+//! ## Background threads
+//!
+//! The first read poll starts a thread that waits for incoming data and appends to an in-memory
+//! FIFO shared by [`Stream`] and [`AsyncRead`]. There is no backpressure; receive buffering grows
+//! without bound. The first write poll starts a separate thread for outbound data.
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use serialport_stream::{new, ClearBuffer, DataBits, FlowControl, Parity, StopBits};
+//! use futures::io::AsyncWriteExt;
+//! use futures::stream::TryStreamExt;
+//!
+//! # async fn example() -> std::io::Result<()> {
+//! let mut stream = new("/dev/ttyUSB0", 115200)
+//!     .data_bits(DataBits::Eight)
+//!     .parity(Parity::None)
+//!     .stop_bits(StopBits::One)
+//!     .flow_control(FlowControl::None)
+//!     .clear(ClearBuffer::All)
+//!     .open()?;
+//!
+//! stream.write_all(b"PING\r\n").await?;
+//!
+//! while let Some(chunk) = stream.try_next().await? {
+//!     println!("{chunk:?}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Reading
+//!
+//! [`SerialPortStream`] implements [`Stream`] (each item is all bytes currently in the FIFO) and
+//! [`AsyncRead`] (partial reads from the same FIFO). Use one primary read style per open port.
+//! [`SerialPortStream::try_poll_next`] matches [`Stream::poll_next`] for manual polling.
+//!
+//! ## Writing
+//!
+//! [`AsyncWrite`] queues one buffer per in-flight `poll_write` on the write thread. Extension
+//! traits [`AsyncWriteExt`], [`AsyncReadExt`], and [`TryStreamExt`] are re-exported from `futures`.
 //!
 
 use std::pin::Pin;
@@ -9,8 +63,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 mod platform;
+mod types;
 
 pub mod line_settings;
+pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
 use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
@@ -18,8 +74,6 @@ use futures::task::AtomicWaker;
 pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
-pub use serialport;
-use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 #[derive(Debug)]
 pub(crate) struct EventsInner {
@@ -62,16 +116,16 @@ impl EventsInnerWrite {
     }
 }
 
-/// Builder for configuring and opening a serial port stream.
+/// Builder for serial port path, line settings, and one-shot open options.
 ///
-/// Use the [`new()`] function to create a builder, then chain configuration
-/// methods before calling [`open()`](SerialPortStreamBuilder::open).
+/// Created with [`new()`], configured with chained methods, then finalized with
+/// [`open()`](SerialPortStreamBuilder::open).
 ///
 /// # Example
 ///
 /// ```no_run
 /// use serialport_stream::new;
-/// use serialport::{DataBits, Parity, StopBits, FlowControl};
+/// use serialport_stream::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 ///
 /// # fn example() -> std::io::Result<()> {
 /// let stream = new("/dev/ttyUSB0", 115200)
@@ -79,6 +133,8 @@ impl EventsInnerWrite {
 ///     .parity(Parity::None)
 ///     .stop_bits(StopBits::One)
 ///     .flow_control(FlowControl::None)
+///     .dtr_on_open(true)
+///     .clear(ClearBuffer::All)
 ///     .open()?;
 /// # Ok(())
 /// # }
@@ -92,6 +148,7 @@ pub struct SerialPortStreamBuilder {
     pub(crate) parity: Parity,
     pub(crate) stop_bits: StopBits,
     pub(crate) dtr_on_open: Option<bool>,
+    pub(crate) clear_buffer: Option<ClearBuffer>,
 }
 
 impl SerialPortStreamBuilder {
@@ -170,8 +227,19 @@ impl SerialPortStreamBuilder {
         self
     }
 
-    /// Opens the serial port and creates the stream.
+    /// Clears RX and/or TX driver buffers when the port is opened, before async I/O starts.
     ///
+    /// See [`ClearBuffer`] (`Input`, `Output`, or `All`).
+    #[must_use]
+    pub fn clear(mut self, buffer: ClearBuffer) -> Self {
+        self.clear_buffer = Some(buffer);
+        self
+    }
+
+    /// Opens the serial port and returns a [`SerialPortStream`].
+    ///
+    /// Applies line settings, optional [`dtr_on_open`](Self::dtr_on_open), and optional
+    /// [`clear`](Self::clear) before any background read/write threads are started.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let inner = Arc::new(EventsInner::new());
         let write_inner = Arc::new(EventsInnerWrite::new());
@@ -183,12 +251,29 @@ impl SerialPortStreamBuilder {
     }
 }
 
-/// Creates a new serial port stream builder.
+/// Creates a [`SerialPortStreamBuilder`] with default line settings (8N1, no flow control).
 ///
-/// This is the main entry point for creating a serial port stream. After creating
-/// the builder, you can chain configuration methods and call `.open()` to create
-/// the stream.
+/// # Examples
 ///
+/// Unix device path:
+///
+/// ```no_run
+/// # use serialport_stream::new;
+/// # fn example() -> std::io::Result<()> {
+/// let _stream = new("/dev/ttyUSB0", 115200).open()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Windows COM port:
+///
+/// ```no_run
+/// # use serialport_stream::new;
+/// # fn example() -> std::io::Result<()> {
+/// let _stream = new("COM3", 9600).open()?;
+/// # Ok(())
+/// # }
+/// ```
 pub fn new<'a>(
     path: impl Into<std::borrow::Cow<'a, str>>,
     baud_rate: u32,
@@ -201,17 +286,33 @@ pub fn new<'a>(
         parity: Parity::None,
         stop_bits: StopBits::One,
         dtr_on_open: None,
+        clear_buffer: None,
     }
 }
 
-/// An async stream for reading from a serial port.
+/// An opened serial port for async reads and writes.
 ///
-/// This struct exposes asynchronous ingress and synchronous control lines on the port:
-/// - Implements `futures::Stream` for asynchronous streaming of incoming data
-/// - Implements `futures::io::AsyncRead` for byte-oriented async reads from the same receive buffer
+/// - [`Stream`] / [`AsyncRead`]: shared in-memory receive FIFO (background read thread).
+/// - [`AsyncWrite`]: dedicated background write thread.
 ///
-/// `Stream` and `AsyncRead` both consume the same FIFO; pick one primary mode for a given stream.
+/// Configure the port only via [`SerialPortStreamBuilder`] before [`SerialPortStreamBuilder::open`].
 ///
+/// # Example
+///
+/// ```no_run
+/// use serialport_stream::new;
+/// use futures::io::AsyncWriteExt;
+/// use futures::stream::TryStreamExt;
+///
+/// # async fn example() -> std::io::Result<()> {
+/// let mut stream = new("COM3", 115200).open()?;
+/// stream.write_all(&[0x0a, 0xC0]).await?;
+/// if let Some(bytes) = stream.try_next().await? {
+///     println!("{bytes:?}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct SerialPortStream {
     platform: PlatformStream,
@@ -220,46 +321,6 @@ pub struct SerialPortStream {
 }
 
 impl SerialPortStream {
-    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
-        self.platform.clear(buffer_to_clear)
-    }
-
-    pub fn set_break(&mut self) -> std::io::Result<()> {
-        self.platform.set_break()
-    }
-
-    pub fn clear_break(&mut self) -> std::io::Result<()> {
-        self.platform.clear_break()
-    }
-
-    pub fn write_request_to_send(&mut self, level: bool) -> std::io::Result<()> {
-        self.platform.write_request_to_send(level)
-    }
-
-    pub fn write_data_terminal_ready(&mut self, level: bool) -> std::io::Result<()> {
-        self.platform.write_data_terminal_ready(level)
-    }
-
-    pub fn read_clear_to_send(&mut self) -> std::io::Result<bool> {
-        self.platform.read_clear_to_send()
-    }
-
-    pub fn read_data_set_ready(&mut self) -> std::io::Result<bool> {
-        self.platform.read_data_set_ready()
-    }
-
-    pub fn read_ring_indicator(&mut self) -> std::io::Result<bool> {
-        self.platform.read_ring_indicator()
-    }
-
-    pub fn read_carrier_detect(&mut self) -> std::io::Result<bool> {
-        self.platform.read_carrier_detect()
-    }
-
-    pub fn bytes_to_read(&self) -> std::io::Result<u32> {
-        self.platform.bytes_to_read()
-    }
-
     fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.inner.waker.register(cx.waker());
 
@@ -289,6 +350,10 @@ impl SerialPortStream {
         Poll::Ready(Ok(()))
     }
 
+    /// Polls for the next received chunk, same as [`Stream::poll_next`].
+    ///
+    /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered,
+    /// or `Poll::Pending` if the read thread has not yet delivered data.
     pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,

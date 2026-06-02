@@ -400,23 +400,10 @@ impl AsyncWrite for SerialPortStream {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.as_mut().get_mut();
-        match this.poll_writer_ready(cx) {
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
-                let pending = this.write_inner.pending.lock().unwrap();
-                match *pending {
-                    PendingWrite::Buffer(_) => Poll::Pending,
-                    PendingWrite::Idle | PendingWrite::Completed(_) => Poll::Ready(Ok(())),
-                }
-            }
-            Poll::Pending => {
-                panic!("Pending");
-            }
-        }
+        todo!()
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        self.as_mut().poll_flush(cx)
+        todo!()
     }
 }

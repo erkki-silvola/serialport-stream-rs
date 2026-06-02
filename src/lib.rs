@@ -16,6 +16,8 @@ use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
 
 pub use futures::io::{AsyncRead, AsyncReadExt};
+#[cfg(unix)]
+pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
 pub use serialport;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -32,6 +34,30 @@ impl EventsInner {
         Self {
             in_buffer: Mutex::new(Vec::new()),
             stream_error: Mutex::new(None),
+            waker: AtomicWaker::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingWrite {
+    Idle,
+    Buffer(Vec<u8>),
+    Completed(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct EventsInnerWrite {
+    pub(crate) pending: Mutex<PendingWrite>,
+    pub(crate) write_error: Mutex<Option<std::io::Error>>,
+    pub(crate) waker: AtomicWaker,
+}
+
+impl EventsInnerWrite {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Mutex::new(PendingWrite::Idle),
+            write_error: Mutex::new(None),
             waker: AtomicWaker::new(),
         }
     }
@@ -149,10 +175,22 @@ impl SerialPortStreamBuilder {
     ///
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let inner = Arc::new(EventsInner::new());
-        Ok(SerialPortStream {
-            platform: PlatformStream::new(self, inner.clone())?,
-            inner,
-        })
+        #[cfg(unix)]
+        {
+            let write_inner = Arc::new(EventsInnerWrite::new());
+            Ok(SerialPortStream {
+                platform: PlatformStream::new(self, inner.clone(), write_inner.clone())?,
+                inner,
+                write_inner,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(SerialPortStream {
+                platform: PlatformStream::new(self, inner.clone())?,
+                inner,
+            })
+        }
     }
 }
 
@@ -189,6 +227,8 @@ pub fn new<'a>(
 pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
+    #[cfg(unix)]
+    write_inner: Arc<EventsInnerWrite>,
 }
 
 impl SerialPortStream {
@@ -242,6 +282,21 @@ impl SerialPortStream {
         if !self.platform.is_thread_started() {
             self.platform.start_thread();
             return Poll::Pending;
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    #[cfg(unix)]
+    fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.write_inner.waker.register(cx.waker());
+
+        if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
+            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
+        }
+
+        if !self.platform.is_write_thread_started() {
+            self.platform.start_write_thread();
         }
 
         Poll::Ready(Ok(()))
@@ -310,5 +365,74 @@ impl Stream for SerialPortStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.try_poll_next(cx)
+    }
+}
+
+#[cfg(unix)]
+impl AsyncWrite for SerialPortStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        assert!(!buf.is_empty());
+        let this = self.as_mut().get_mut();
+        match this.poll_writer_ready(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let mut pending = this.write_inner.pending.lock().unwrap();
+                print!("pending {pending:?}");
+                match *pending {
+                    crate::PendingWrite::Idle => {
+                        // new transaction
+                        *pending = crate::PendingWrite::Buffer(buf.to_vec());
+                        drop(pending);
+                        self.platform.signal_write();
+                        Poll::Pending
+                    }
+                    crate::PendingWrite::Buffer(_) => {
+                        // write still pending
+                        Poll::Pending
+                    }
+                    crate::PendingWrite::Completed(n) => {
+                        *pending = crate::PendingWrite::Idle;
+                        Poll::Ready(Ok(n))
+                    }
+                }
+            }
+            Poll::Pending => {
+                panic!("Pending");
+            }
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        todo!()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        todo!()
+        // match self.as_mut().get_mut().poll_writer_ready(cx) {
+        //     Poll::Pending => Poll::Pending,
+        //     Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        //     Poll::Ready(Ok(())) => {
+        //         let pending = self.write_inner.pending.lock().unwrap();
+        //         if let Some(ref write) = *pending {
+        //             if write.completed < write.buf.len() {
+        //                 return Poll::Pending;
+        //             }
+        //         }
+        //         Poll::Ready(Ok(()))
+        //     }
+        // }
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        todo!();
+        // self.as_mut().poll_flush(cx)
     }
 }

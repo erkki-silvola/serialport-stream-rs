@@ -19,7 +19,7 @@ struct UnixInner {
 
 #[derive(Debug)]
 pub struct PlatformStream {
-    thread_handle: Option<std::thread::JoinHandle<()>>,
+    read_thread_handle: Option<std::thread::JoinHandle<()>>,
     write_thread_handle: Option<std::thread::JoinHandle<()>>,
     inner: Arc<EventsInner>,
     write_inner: Arc<EventsInnerWrite>,
@@ -32,7 +32,7 @@ pub struct PlatformStream {
 impl Drop for PlatformStream {
     fn drop(&mut self) {
         let read_running = self
-            .thread_handle
+            .read_thread_handle
             .as_ref()
             .is_some_and(|handle| !handle.is_finished());
         let write_running = self
@@ -45,7 +45,7 @@ impl Drop for PlatformStream {
             assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
         }
 
-        if let Some(handle) = self.thread_handle.take() {
+        if let Some(handle) = self.read_thread_handle.take() {
             if !handle.is_finished() {
                 handle.join().unwrap();
             }
@@ -85,7 +85,7 @@ impl PlatformStream {
         };
 
         Ok(Self {
-            thread_handle: None,
+            read_thread_handle: None,
             write_thread_handle: None,
             inner,
             write_inner,
@@ -96,23 +96,23 @@ impl PlatformStream {
         })
     }
 
-    pub fn is_thread_started(&self) -> bool {
-        self.thread_handle.is_some()
+    pub fn is_read_thread_started(&self) -> bool {
+        self.read_thread_handle.is_some()
     }
 
     pub fn is_write_thread_started(&self) -> bool {
         self.write_thread_handle.is_some()
     }
 
-    pub fn start_thread(&mut self) {
-        assert!(self.thread_handle.is_none());
+    pub fn start_read_thread(&mut self) {
+        assert!(self.read_thread_handle.is_none());
 
         let (tx, rx) = mpsc::channel();
         let inner_cloned = self.inner.clone();
         let cancel_fd = self.unix_inner.cancel_pipe.0.as_raw_fd();
         let read_fd = self.read_fd.take().unwrap();
 
-        self.thread_handle = Some(std::thread::spawn(move || {
+        self.read_thread_handle = Some(std::thread::spawn(move || {
             tx.send(0).unwrap();
             if let Err(err) = Self::receive_thread(&inner_cloned, read_fd, cancel_fd) {
                 *inner_cloned.stream_error.lock().unwrap() = Some(err);

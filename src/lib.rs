@@ -16,7 +16,6 @@ use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
 
 pub use futures::io::{AsyncRead, AsyncReadExt};
-#[cfg(unix)]
 pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
 pub use serialport;
@@ -175,22 +174,12 @@ impl SerialPortStreamBuilder {
     ///
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let inner = Arc::new(EventsInner::new());
-        #[cfg(unix)]
-        {
-            let write_inner = Arc::new(EventsInnerWrite::new());
-            Ok(SerialPortStream {
-                platform: PlatformStream::new(self, inner.clone(), write_inner.clone())?,
-                inner,
-                write_inner,
-            })
-        }
-        #[cfg(windows)]
-        {
-            Ok(SerialPortStream {
-                platform: PlatformStream::new(self, inner.clone())?,
-                inner,
-            })
-        }
+        let write_inner = Arc::new(EventsInnerWrite::new());
+        Ok(SerialPortStream {
+            platform: PlatformStream::new(self, inner.clone(), write_inner.clone())?,
+            inner,
+            write_inner,
+        })
     }
 }
 
@@ -227,7 +216,6 @@ pub fn new<'a>(
 pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
-    #[cfg(unix)]
     write_inner: Arc<EventsInnerWrite>,
 }
 
@@ -279,15 +267,14 @@ impl SerialPortStream {
             return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
         }
 
-        if !self.platform.is_thread_started() {
-            self.platform.start_thread();
+        if !self.platform.is_read_thread_started() {
+            self.platform.start_read_thread();
             return Poll::Pending;
         }
 
         Poll::Ready(Ok(()))
     }
 
-    #[cfg(unix)]
     fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.write_inner.waker.register(cx.waker());
 
@@ -368,7 +355,6 @@ impl Stream for SerialPortStream {
     }
 }
 
-#[cfg(unix)]
 impl AsyncWrite for SerialPortStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -381,7 +367,6 @@ impl AsyncWrite for SerialPortStream {
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(())) => {
                 let mut pending = this.write_inner.pending.lock().unwrap();
-                print!("pending {pending:?}");
                 match *pending {
                     crate::PendingWrite::Idle => {
                         // new transaction
@@ -408,31 +393,30 @@ impl AsyncWrite for SerialPortStream {
 
     fn poll_write_vectored(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        _bufs: &[std::io::IoSlice<'_>],
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<std::io::Result<usize>> {
         todo!()
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!()
-        // match self.as_mut().get_mut().poll_writer_ready(cx) {
-        //     Poll::Pending => Poll::Pending,
-        //     Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-        //     Poll::Ready(Ok(())) => {
-        //         let pending = self.write_inner.pending.lock().unwrap();
-        //         if let Some(ref write) = *pending {
-        //             if write.completed < write.buf.len() {
-        //                 return Poll::Pending;
-        //             }
-        //         }
-        //         Poll::Ready(Ok(()))
-        //     }
-        // }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        match this.poll_writer_ready(cx) {
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let pending = this.write_inner.pending.lock().unwrap();
+                match *pending {
+                    PendingWrite::Buffer(_) => Poll::Pending,
+                    PendingWrite::Idle | PendingWrite::Completed(_) => Poll::Ready(Ok(())),
+                }
+            }
+            Poll::Pending => {
+                panic!("Pending");
+            }
+        }
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!();
-        // self.as_mut().poll_flush(cx)
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.as_mut().poll_flush(cx)
     }
 }

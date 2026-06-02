@@ -1,15 +1,24 @@
 //! Async writes using [`futures::io::AsyncWrite`] with Tokio (`#[tokio::main]`).
 //!
+//! Multiplexes Ctrl+C, incoming stream packets (`try_next`), and periodic writes in one loop.
+//!
 //! Run:
 //! ```text
 //! cargo run --example tokio_async_write -- /dev/ttyUSB0 115200
 //! cargo run --example tokio_async_write -- /dev/ttyUSB0 115200 --trace
 //! ```
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::{Arg, Command};
-use serialport_stream::{new, AsyncWriteExt};
+use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
 use tokio::signal::ctrl_c;
+use tokio::sync::Mutex;
+use tokio::time;
+
+const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,13 +55,18 @@ async fn main() -> Result<()> {
 
     println!("Opening {} @ {} baud", port_name, baud_rate);
 
-    let mut stream = new(port_name, baud_rate).dtr_on_open(true).open()?;
+    let stream = Arc::new(Mutex::new(
+        new(port_name, baud_rate).dtr_on_open(true).open()?,
+    ));
 
-    println!("Writing with AsyncWrite + Tokio (Ctrl+C to stop)");
+    println!("Read / write with AsyncWrite + Stream + Tokio (Ctrl+C to stop)");
     println!("--------------------------------------------------------------------------------");
 
     let ctrl_c = ctrl_c();
     tokio::pin!(ctrl_c);
+
+    let mut write_interval = time::interval(Duration::from_secs(1));
+    write_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -64,14 +78,24 @@ async fn main() -> Result<()> {
             }
 
             res = async {
-                let n = stream.write(&[0xC0]).await?;
-                Ok::<_, std::io::Error>(n)
+                stream.lock().await.try_next().await
             } => {
                 match res {
-                    Ok(n) => {
-                        println!("wrote {n} bytes");
-                        assert_eq!(n,1);
+                    Ok(Some(data)) => println!("received {} bytes: {:02X?}", data.len(), data),
+                    Ok(None) => {
+                        println!("stream ended");
+                        break;
                     }
+                    Err(e) => {
+                        eprintln!("read error: {e}");
+                        break;
+                    }
+                }
+            }
+
+            _ = write_interval.tick() => {
+                match stream.lock().await.write(WRITE_PAYLOAD).await {
+                    Ok(n) => println!("wrote {n} bytes"),
                     Err(e) => {
                         eprintln!("write error: {e}");
                         break;
@@ -79,8 +103,6 @@ async fn main() -> Result<()> {
                 }
             }
         }
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     Ok(())

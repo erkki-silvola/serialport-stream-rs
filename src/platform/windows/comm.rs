@@ -2,7 +2,8 @@ use std::io;
 use std::mem::MaybeUninit;
 
 use windows_sys::Win32::Devices::Communication::*;
-use windows_sys::Win32::Foundation::{FlushFileBuffers, FALSE, HANDLE};
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 
 use crate::types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 use crate::SerialPortStreamBuilder;

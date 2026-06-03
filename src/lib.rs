@@ -465,16 +465,18 @@ impl AsyncWrite for SerialPortStream {
             return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
         }
 
-        if this.platform.is_write_thread_started() {
-            let pending = this.write_inner.pending.lock().unwrap();
-            match *pending {
-                crate::PendingWrite::Idle | crate::PendingWrite::Completed(_) => {
-                    Poll::Ready(Ok(()))
-                }
-                crate::PendingWrite::Buffer(_) => Poll::Pending,
-            }
-        } else {
-            Poll::Ready(Ok(()))
+        if matches!(
+            *this.write_inner.pending.lock().unwrap(),
+            crate::PendingWrite::Buffer(_)
+        ) {
+            println!("pending");
+            return Poll::Pending;
+        }
+
+        // NOTE temp solution
+        match this.platform.flush_tx() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(e) => Poll::Ready(Err(e)),
         }
     }
 

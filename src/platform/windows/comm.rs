@@ -2,7 +2,7 @@ use std::io;
 use std::mem::MaybeUninit;
 
 use windows_sys::Win32::Devices::Communication::*;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{FlushFileBuffers, FALSE, HANDLE};
 
 use crate::types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 use crate::SerialPortStreamBuilder;
@@ -199,6 +199,15 @@ pub fn clear(handle: HANDLE, buffer: ClearBuffer) -> io::Result<()> {
         ClearBuffer::All => PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR,
     };
     if unsafe { PurgeComm(handle, flags) } != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Waits until buffered transmit data has been sent (`FlushFileBuffers`).
+pub fn flush_output(handle: HANDLE) -> io::Result<()> {
+    if unsafe { FlushFileBuffers(handle) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

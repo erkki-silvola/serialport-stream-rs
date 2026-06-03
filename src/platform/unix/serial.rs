@@ -8,7 +8,8 @@ use nix::errno::Errno;
 use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
 use nix::libc;
 use nix::sys::stat::Mode;
-use nix::sys::termios::{self, FlushArg};
+use nix::sys::termios;
+use nix::sys::termios::FlushArg;
 
 use crate::types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 use crate::SerialPortStreamBuilder;
@@ -351,4 +352,16 @@ pub fn clear(fd: RawFd, buffer: ClearBuffer) -> io::Result<()> {
     };
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     termios::tcflush(borrowed, arg).map_err(io::Error::from)
+}
+
+/// Waits until all written output has been transmitted (`tcdrain`).
+pub fn flush_output(fd: RawFd) -> io::Result<()> {
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    loop {
+        match termios::tcdrain(borrowed) {
+            Ok(()) => return Ok(()),
+            Err(Errno::EINTR) => continue,
+            Err(e) => return Err(io::Error::from(e)),
+        }
+    }
 }

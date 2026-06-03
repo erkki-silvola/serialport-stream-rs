@@ -27,6 +27,7 @@ pub struct PlatformStream {
     unix_inner: UnixInner,
     read_fd: Option<OwnedFd>,
     write_fd: Option<OwnedFd>,
+    flush_fd: OwnedFd,
 }
 
 impl Drop for PlatformStream {
@@ -39,7 +40,6 @@ impl Drop for PlatformStream {
             .write_thread_handle
             .as_ref()
             .is_some_and(|handle| !handle.is_finished());
-
         if read_running || write_running {
             let fd = self.unix_inner.cancel_pipe.1.as_fd();
             assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
@@ -72,6 +72,7 @@ impl PlatformStream {
         let port_fd = port.as_fd();
         let read_fd = nix::unistd::dup(port_fd)?;
         let write_fd = nix::unistd::dup(port_fd)?;
+        let flush_fd = nix::unistd::dup(port_fd)?;
         drop(port);
 
         let cancel_pipe = nix::unistd::pipe().unwrap();
@@ -89,7 +90,12 @@ impl PlatformStream {
             unix_inner,
             read_fd: Some(read_fd),
             write_fd: Some(write_fd),
+            flush_fd,
         })
+    }
+
+    pub fn flush_tx(&self) -> std::io::Result<()> {
+        serial::flush_output(self.flush_fd.as_raw_fd())
     }
 
     pub fn is_read_thread_started(&self) -> bool {

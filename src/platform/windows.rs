@@ -214,6 +214,10 @@ impl PlatformStream {
         );
     }
 
+    pub fn flush_tx(&self) -> io::Result<()> {
+        comm::flush_output(self.port_handle().0)
+    }
+
     fn receive_events(
         read_handle: HandleWrapper,
         abort_event: HandleWrapper,

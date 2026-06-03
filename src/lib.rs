@@ -456,19 +456,29 @@ impl AsyncWrite for SerialPortStream {
         }
     }
 
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> Poll<std::io::Result<usize>> {
-        todo!()
-    }
-
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!()
+        let this = self.as_mut().get_mut();
+
+        this.write_inner.waker.register(cx.waker());
+
+        if let Some(err) = this.write_inner.write_error.lock().unwrap().as_ref() {
+            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
+        }
+
+        if this.platform.is_write_thread_started() {
+            let pending = this.write_inner.pending.lock().unwrap();
+            match *pending {
+                crate::PendingWrite::Idle | crate::PendingWrite::Completed(_) => {
+                    Poll::Ready(Ok(()))
+                }
+                crate::PendingWrite::Buffer(_) => Poll::Pending,
+            }
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        todo!()
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_flush(cx)
     }
 }

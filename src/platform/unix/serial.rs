@@ -127,9 +127,7 @@ fn get_termios(fd: RawFd) -> io::Result<Termios> {
     ))]
     {
         let mut termios = MaybeUninit::uninit();
-        let res = unsafe {
-            libc::ioctl(fd, TCGETS2 as libc::c_ulong, termios.as_mut_ptr())
-        };
+        let res = unsafe { libc::ioctl(fd, TCGETS2 as libc::c_ulong, termios.as_mut_ptr()) };
         Errno::result(res)?;
         Ok(unsafe { termios.assume_init() })
     }
@@ -171,13 +169,7 @@ fn set_termios(fd: RawFd, termios: &libc::termios, baud_rate: u32) -> io::Result
 ))]
 fn set_termios(fd: RawFd, termios: &libc::termios2, baud_rate: u32) -> io::Result<()> {
     let _ = baud_rate;
-    let res = unsafe {
-        libc::ioctl(
-            fd,
-            TCSETS2 as libc::c_ulong,
-            termios as *const _ as *mut _,
-        )
-    };
+    let res = unsafe { libc::ioctl(fd, TCSETS2 as libc::c_ulong, termios as *const _ as *mut _) };
     Errno::result(res)?;
     Ok(())
 }
@@ -269,7 +261,7 @@ fn set_baud_rate(termios: &mut Termios, baud_rate: u32) -> io::Result<()> {
     {
         let _ = termios;
         let _ = baud_rate;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(
@@ -292,9 +284,9 @@ fn set_baud_rate(termios: &mut Termios, baud_rate: u32) -> io::Result<()> {
 ))]
 fn linux_ppc_baud_constant(baud_rate: u32) -> io::Result<libc::tcflag_t> {
     use libc::{
-        B1000000, B1152000, B1500000, B2000000, B2500000, B3000000, B3500000, B4000000, B460800,
-        B500000, B576000, B921600, B110, B115200, B1200, B134, B150, B1800, B19200, B200, B230400,
-        B2400, B300, B38400, B4800, B50, B57600, B600, B75, B9600,
+        B1000000, B110, B115200, B1152000, B1200, B134, B150, B1500000, B1800, B19200, B200,
+        B2000000, B230400, B2400, B2500000, B300, B3000000, B3500000, B38400, B4000000, B460800,
+        B4800, B50, B500000, B57600, B576000, B600, B75, B921600, B9600,
     };
     let speed = match baud_rate {
         50 => B50,

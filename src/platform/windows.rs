@@ -173,7 +173,9 @@ impl PlatformStream {
 
         self.read_thread_handle = Some(std::thread::spawn(move || {
             tx.send(0).unwrap();
-            if let Err(e) = Self::receive_events(read_handle, abort_event_cloned, inner_cloned.clone()) {
+            if let Err(e) =
+                Self::receive_events(read_handle, abort_event_cloned, inner_cloned.clone())
+            {
                 *inner_cloned.stream_error.lock().unwrap() = Some(e);
                 inner_cloned.waker.wake();
             }
@@ -206,7 +208,10 @@ impl PlatformStream {
     }
 
     pub fn signal_write(&self) {
-        assert_eq!(unsafe { SetEvent(self.windows_inner.write_signal_event.0) }, TRUE);
+        assert_eq!(
+            unsafe { SetEvent(self.windows_inner.write_signal_event.0) },
+            TRUE
+        );
     }
 
     fn receive_events(
@@ -344,12 +349,7 @@ impl PlatformStream {
         loop {
             let objects = [write_signal_event.0, write_abort_event.0];
             match unsafe {
-                WaitForMultipleObjects(
-                    objects.len() as u32,
-                    objects.as_ptr(),
-                    0,
-                    INFINITE,
-                )
+                WaitForMultipleObjects(objects.len() as u32, objects.as_ptr(), 0, INFINITE)
             } {
                 WAIT_OBJECT_0 => {}
                 val if val == WAIT_OBJECT_0 + 1 => return Ok(()),
@@ -427,7 +427,10 @@ impl Drop for PlatformStream {
 
         if let Some(handle) = self.write_thread_handle.take() {
             if !handle.is_finished() {
-                assert_eq!(unsafe { SetEvent(self.windows_inner.write_abort_event.0) }, TRUE);
+                assert_eq!(
+                    unsafe { SetEvent(self.windows_inner.write_abort_event.0) },
+                    TRUE
+                );
                 handle.join().unwrap();
             }
         }

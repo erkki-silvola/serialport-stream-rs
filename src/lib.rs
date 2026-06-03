@@ -466,7 +466,6 @@ impl AsyncWrite for SerialPortStream {
             *this.write_inner.pending.lock().unwrap(),
             crate::PendingWrite::Buffer(_)
         ) {
-            println!("pending");
             return Poll::Pending;
         }
 

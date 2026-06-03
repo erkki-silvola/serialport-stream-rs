@@ -25,7 +25,7 @@ const TIOCM_DTR: libc::c_int = 0x002;
         not(any(target_arch = "powerpc", target_arch = "powerpc64"))
     )
 ))]
-const TCGETS2: libc::c_int = 0x802c542a;
+const TCGETS2: libc::c_ulong = 0x802c542a;
 #[cfg(any(
     target_os = "android",
     all(
@@ -33,7 +33,7 @@ const TCGETS2: libc::c_int = 0x802c542a;
         not(any(target_arch = "powerpc", target_arch = "powerpc64"))
     )
 ))]
-const TCSETS2: libc::c_int = 0x402c542b;
+const TCSETS2: libc::c_ulong = 0x402c542b;
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 const IOSSIOSPEED: libc::c_ulong = 0x8004_5402;
@@ -128,7 +128,7 @@ fn get_termios(fd: RawFd) -> io::Result<Termios> {
     ))]
     {
         let mut termios = MaybeUninit::uninit();
-        let res = unsafe { libc::ioctl(fd, TCGETS2 as libc::c_ulong, termios.as_mut_ptr()) };
+        let res = unsafe { libc::ioctl(fd, TCGETS2, termios.as_mut_ptr()) };
         Errno::result(res)?;
         Ok(unsafe { termios.assume_init() })
     }
@@ -170,7 +170,13 @@ fn set_termios(fd: RawFd, termios: &libc::termios, baud_rate: u32) -> io::Result
 ))]
 fn set_termios(fd: RawFd, termios: &libc::termios2, baud_rate: u32) -> io::Result<()> {
     let _ = baud_rate;
-    let res = unsafe { libc::ioctl(fd, TCSETS2 as libc::c_ulong, termios as *const _ as *mut _) };
+    let res = unsafe {
+        libc::ioctl(
+            fd,
+            TCSETS2,
+            termios as *const libc::termios2 as *mut libc::c_void,
+        )
+    };
     Errno::result(res)?;
     Ok(())
 }

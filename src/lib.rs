@@ -336,18 +336,18 @@ impl SerialPortStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
         self.write_inner.waker.register(cx.waker());
 
         if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
+            return Err(std::io::Error::new(err.kind(), err.to_string()));
         }
 
         if !self.platform.is_write_thread_started() {
             self.platform.start_write_thread();
         }
 
-        Poll::Ready(Ok(()))
+        Ok(())
     }
 
     /// Polls for the next received chunk, same as [`Stream::poll_next`].
@@ -429,8 +429,8 @@ impl AsyncWrite for SerialPortStream {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
         match this.poll_writer_ready(cx) {
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
+            Err(e) => Poll::Ready(Err(e)),
+            Ok(()) => {
                 let mut pending = this.write_inner.pending.lock().unwrap();
                 match *pending {
                     crate::PendingWrite::Idle => {
@@ -449,9 +449,6 @@ impl AsyncWrite for SerialPortStream {
                         Poll::Ready(Ok(n))
                     }
                 }
-            }
-            Poll::Pending => {
-                panic!("Pending");
             }
         }
     }

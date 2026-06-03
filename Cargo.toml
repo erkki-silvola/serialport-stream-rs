@@ -1,9 +1,9 @@
 [package]
 name = "serialport-stream"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Erkki Silvola"]
-description = "Async TryStream for serialport reading utilizing serialport-rs using platform-specific I/O"
+description = "Async Stream and AsyncRead/AsyncWrite for serial ports using platform-specific I/O"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/erkki-silvola/serialport-stream-rs"
 homepage = "https://github.com/erkki-silvola/serialport-stream-rs"
@@ -12,12 +12,11 @@ categories = ["asynchronous", "hardware-support"]
 readme = "README.md"
 
 [dependencies]
-serialport = "4.9.0"
 futures = { version = "0.3", features = ["std"] }
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30.1", features = ["poll", "fs"] }
+nix = { version = "0.30.1", features = ["poll", "fs", "term", "ioctl"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

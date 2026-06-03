@@ -1,11 +1,11 @@
-use serialport::{DataBits, FlowControl, Parity, StopBits};
+use crate::types::{DataBits, FlowControl, Parity, StopBits};
 use std::io;
 
 fn invalid_input(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, msg.into())
 }
 
-/// Maps `5`…`8` to [`DataBits`], same rule set as `serialport::TryFrom<u8>`.
+/// Maps `5`…`8` to [`DataBits`].
 ///
 /// Returns [`io::ErrorKind::InvalidInput`] when `value` is not in range.
 pub fn data_bits_from_u8(value: u8) -> Result<DataBits, io::Error> {
@@ -20,7 +20,7 @@ pub fn data_bits_from_u8(value: u8) -> Result<DataBits, io::Error> {
     }
 }
 
-/// Maps `1` or `2` to [`StopBits`], same rule set as `serialport::TryFrom<u8>`.
+/// Maps `1` or `2` to [`StopBits`].
 ///
 /// Returns [`io::ErrorKind::InvalidInput`] when `value` is not `1` or `2`.
 pub fn stop_bits_from_u8(value: u8) -> Result<StopBits, io::Error> {

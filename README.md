@@ -1,6 +1,6 @@
 # serialport-stream-rs
 
-Implements `futures::Stream` and `futures::io::AsyncRead` utilizing [serialport-rs](https://github.com/serialport/serialport-rs).
+Implements `futures::Stream`, `futures::io::AsyncRead`, and `futures::io::AsyncWrite` using platform-native serial port I/O (POSIX termios on Unix, Win32 COMM APIs on Windows).
 Initial poll starts background thread which will indefinitely wait for data in event, error or drop.
 There is no backpressure handling; the crate will buffer incoming data indefinitely.
 
@@ -74,13 +74,15 @@ For Tokio’s `tokio::io::AsyncRead`, bridge via [`tokio_util::compat`](https://
 - `.parity(Parity)` - Set parity (None, Odd, Even)
 - `.stop_bits(StopBits)` - Set stop bits (One, Two)
 - `.dtr_on_open(bool)` - Control DTR signal on open
+- `.clear(ClearBuffer)` - Clear RX/TX buffers when the port is opened
 - `.open()` - Open the port and create the stream
 
 ### SerialPortStream Methods
 
 - Implements `futures::Stream` — asynchronous streaming (`Result<Vec<u8>, io::Error>` items)
 - Implements `futures::io::AsyncRead` — partial reads from the same receive FIFO; re-exported with `AsyncReadExt`
-- Other methods expose serial control lines (`write_request_to_send`, modem status reads, buffers, breaks, etc.)
+- Implements `futures::io::AsyncWrite` — asynchronous writes via a dedicated background thread; re-exported with `AsyncWriteExt`
+- Configuration types (`DataBits`, `Parity`, `StopBits`, `FlowControl`, `ClearBuffer`) are defined in this crate (import from `serialport_stream`)
 
 ## License
 
@@ -95,6 +97,3 @@ at your option.
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## Acknowledgments
-
-This crate builds upon [serialport-rs](https://github.com/serialport/serialport-rs) for cross-platform serial port access.

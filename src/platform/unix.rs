@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use nix::libc::{c_int, ioctl, FIONREAD};
 use nix::poll::{poll, PollFd, PollFlags};
-use serialport::SerialPort;
 
 use crate::{EventsInner, EventsInnerWrite, SerialPortStreamBuilder};
+
+mod serial;
 
 /// Unix-specific fields
 #[derive(Debug)]
@@ -24,9 +25,9 @@ pub struct PlatformStream {
     inner: Arc<EventsInner>,
     write_inner: Arc<EventsInnerWrite>,
     unix_inner: UnixInner,
-    port: Option<serialport::TTYPort>,
     read_fd: Option<OwnedFd>,
     write_fd: Option<OwnedFd>,
+    flush_fd: OwnedFd,
 }
 
 impl Drop for PlatformStream {
@@ -39,7 +40,6 @@ impl Drop for PlatformStream {
             .write_thread_handle
             .as_ref()
             .is_some_and(|handle| !handle.is_finished());
-
         if read_running || write_running {
             let fd = self.unix_inner.cancel_pipe.1.as_fd();
             assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
@@ -65,17 +65,15 @@ impl PlatformStream {
         inner: Arc<EventsInner>,
         write_inner: Arc<EventsInnerWrite>,
     ) -> Result<Self, std::io::Error> {
-        let serialport_builder = serialport::new(builder.path, builder.baud_rate)
-            .data_bits(builder.data_bits)
-            .flow_control(builder.flow_control)
-            .parity(builder.parity)
-            .stop_bits(builder.stop_bits)
-            .dtr_on_open(builder.dtr_on_open.unwrap_or(false));
-
-        let port = serialport_builder.open_native()?;
-        let port_fd = unsafe { BorrowedFd::borrow_raw(port.as_raw_fd()) };
+        let port = serial::open_port(&builder)?;
+        if let Some(buffer) = builder.clear_buffer {
+            serial::clear(port.as_raw_fd(), buffer)?;
+        }
+        let port_fd = port.as_fd();
         let read_fd = nix::unistd::dup(port_fd)?;
         let write_fd = nix::unistd::dup(port_fd)?;
+        let flush_fd = nix::unistd::dup(port_fd)?;
+        drop(port);
 
         let cancel_pipe = nix::unistd::pipe().unwrap();
         let write_signal_pipe = nix::unistd::pipe().unwrap();
@@ -90,10 +88,14 @@ impl PlatformStream {
             inner,
             write_inner,
             unix_inner,
-            port: Some(port),
             read_fd: Some(read_fd),
             write_fd: Some(write_fd),
+            flush_fd,
         })
+    }
+
+    pub fn flush_tx(&self) -> std::io::Result<()> {
+        serial::flush_output(self.flush_fd.as_raw_fd())
     }
 
     pub fn is_read_thread_started(&self) -> bool {
@@ -146,6 +148,15 @@ impl PlatformStream {
     pub fn signal_write(&self) {
         let fd = self.unix_inner.write_signal_pipe.1.as_fd();
         assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
+    }
+
+    fn bytes_to_read_fd(fd: BorrowedFd<'_>) -> std::io::Result<u32> {
+        let mut count: c_int = 0;
+        let ret = unsafe { ioctl(fd.as_raw_fd(), FIONREAD, &mut count) };
+        if ret == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(count.max(0) as u32)
     }
 
     fn receive_thread(
@@ -280,90 +291,5 @@ impl PlatformStream {
                 }
             }
         }
-    }
-
-    fn bytes_to_read_fd(fd: BorrowedFd<'_>) -> std::io::Result<u32> {
-        let mut count: c_int = 0;
-        let ret = unsafe { ioctl(fd.as_raw_fd(), FIONREAD, &mut count) };
-        if ret == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(count.max(0) as u32)
-    }
-
-    pub fn clear(&mut self, buffer_to_clear: serialport::ClearBuffer) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.clear(buffer_to_clear)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn set_break(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.set_break()?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn clear_break(&mut self) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.clear_break()?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write_request_to_send(&mut self, level: bool) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.write_request_to_send(level)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn write_data_terminal_ready(&mut self, level: bool) -> std::io::Result<()> {
-        if let Some(ref mut port) = self.port {
-            port.write_data_terminal_ready(level)?;
-            return Ok(());
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_clear_to_send(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_clear_to_send()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_data_set_ready(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_data_set_ready()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_ring_indicator(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_ring_indicator()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn read_carrier_detect(&mut self) -> std::io::Result<bool> {
-        if let Some(ref mut port) = self.port {
-            return Ok(port.read_carrier_detect()?);
-        }
-        Err(std::io::Error::other("Port not available"))
-    }
-
-    pub fn bytes_to_read(&self) -> std::io::Result<u32> {
-        if let Some(ref port) = self.port {
-            let fd = unsafe { BorrowedFd::borrow_raw(port.as_raw_fd()) };
-            return Self::bytes_to_read_fd(fd);
-        }
-        Err(std::io::Error::other("Port not available"))
     }
 }

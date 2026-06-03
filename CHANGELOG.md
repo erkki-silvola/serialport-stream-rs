@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+##### Changed
+
+* Removed the `serialport` dependency; serial ports are opened and configured with native POSIX (`termios`) and Win32 (COMM/DCB) APIs.
+* Configuration types (`DataBits`, `Parity`, `StopBits`, `FlowControl`, `ClearBuffer`) are defined in this crate. Import them from `serialport_stream` instead of `serialport`.
+
+##### Removed
+
+* `pub use serialport` — use `serialport_stream::{DataBits, Parity, StopBits, FlowControl, ClearBuffer}` instead.
+* `SerialPortStream` control-line helpers (`clear`, `set_break`, modem status reads, `bytes_to_read`, etc.). Use `.clear(ClearBuffer)` on the builder before `.open()` for buffer purge at open time.
+
 ## [0.2.0] - 2026-05-27
 
 ##### Added

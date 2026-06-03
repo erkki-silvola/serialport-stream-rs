@@ -4,8 +4,8 @@
 //!
 //! Run:
 //! ```text
-//! cargo run --example tokio_async_write -- /dev/ttyUSB0 115200
-//! cargo run --example tokio_async_write -- /dev/ttyUSB0 115200 --trace
+//! cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200
+//! cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200 --trace
 //! ```
 
 use std::sync::Arc;
@@ -98,6 +98,13 @@ async fn main() -> Result<()> {
                     Ok(n) => println!("wrote {n} bytes"),
                     Err(e) => {
                         eprintln!("write error: {e}");
+                        break;
+                    }
+                }
+                match stream.lock().await.flush().await {
+                    Ok(()) => println!("flushed"),
+                    Err(e) => {
+                        eprintln!("flush error: {e}");
                         break;
                     }
                 }

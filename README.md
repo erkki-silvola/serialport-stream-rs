@@ -1,88 +1,102 @@
 # serialport-stream-rs
 
-Implements `futures::Stream`, `futures::io::AsyncRead`, and `futures::io::AsyncWrite` using platform-native serial port I/O (POSIX termios on Unix, Win32 COMM APIs on Windows).
-Initial poll starts background thread which will indefinitely wait for data in event, error or drop.
-There is no backpressure handling; the crate will buffer incoming data indefinitely.
+Async serial port I/O as [`futures::Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html), [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html), and [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html). Uses POSIX termios on Unix and Win32 COMM APIs on Windows.
 
 ## Installation
 
-Add this to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-serialport-stream = "0.2.0"
-futures-lite = "2.0"
+serialport-stream = "0.3.0"
 ```
+
+Examples below also use `futures-lite` (blocking) or `tokio`.
 
 ## Usage
 
-### Basic Usage
-
-```rust
-use serialport_stream::{new, SerialPortStream};
-use futures_lite::stream;
-
-fn read_serial() -> std::io::Result<()> {
-    // Create a serial port stream using the builder API
-    let stream = new("COM3", 115200)
-        .dtr_on_open(true)
-        .open()?;
-
-    for event in stream::block_on(stream) {
-        let bytes = event?;
-        println!("bytes {bytes:?}");
-    }
-
-    Ok(())
-}
-```
-
-### Using with Tokio
+### Stream (blocking)
 
 ```rust
 use serialport_stream::new;
-use futures_lite::stream::StreamExt;
+use futures_lite::stream;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-     let mut stream = new("/dev/ttyUSB0", 9600)
-        .open()?;
+fn main() -> std::io::Result<()> {
+    let stream = new("COM3", 115200).dtr_on_open(true).open()?;
 
-    while let Ok(Some(result)) = stream.try_next().await {
-        println!("Received: {:?}", result);
+    for chunk in stream::block_on(stream) {
+        println!("{:?}", chunk?);
     }
 
     Ok(())
 }
 ```
 
-`AsyncRead` works the same way: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200` ([`examples/tokio_async_read.rs`](examples/tokio_async_read.rs)).
+### Stream (Tokio)
 
-### Asynchronous byte reads (`AsyncRead`)
+```rust
+use serialport_stream::{new, TryStreamExt};
 
-The stream implements [`futures::io::AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html). Combine it with [`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) for helpers such as `read` and `read_to_end`. Data comes from the same internal buffer as `futures::Stream`; use one primary read style per open stream.
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let mut stream = new("/dev/ttyUSB0", 9600).open()?;
 
-For Tokio’s `tokio::io::AsyncRead`, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) (add `tokio-util` with the `compat` feature to your crate).
+    while let Some(bytes) = stream.try_next().await? {
+        println!("Received: {bytes:?}");
+    }
 
-## API Overview
+    Ok(())
+}
+```
 
-### Builder Functions
+### Reading
 
-- `new(path, baud_rate)` - Create a new builder
-- `.data_bits(DataBits)` - Set data bits (5, 6, 7, 8)
-- `.flow_control(FlowControl)` - Set flow control (None, Software, Hardware)
-- `.parity(Parity)` - Set parity (None, Odd, Even)
-- `.stop_bits(StopBits)` - Set stop bits (One, Two)
-- `.dtr_on_open(bool)` - Control DTR signal on open
-- `.clear(ClearBuffer)` - Clear RX/TX buffers when the port is opened
-- `.open()` - Open the port and create the stream
+A background thread fills one in-memory FIFO. There is no backpressure; the buffer can grow without bound.
 
-### SerialPortStream Methods
+| API | Each call returns |
+| --- | --- |
+| `Stream` / `try_next` | All bytes in the FIFO (buffer drained) |
+| `AsyncRead` | Up to your buffer length; remainder stays in the FIFO |
 
-- Implements `futures::Stream` — asynchronous streaming (`Result<Vec<u8>, io::Error>` items)
-- Implements `futures::io::AsyncRead` — partial reads from the same receive FIFO; re-exported with `AsyncReadExt`
-- Implements `futures::io::AsyncWrite` — asynchronous writes via a dedicated background thread; re-exported with `AsyncWriteExt`
-- Configuration types (`DataBits`, `Parity`, `StopBits`, `FlowControl`, `ClearBuffer`) are defined in this crate (import from `serialport_stream`)
+Use one read style per port. Mixing `Stream` and `AsyncRead` can split messages across calls.
+
+[`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) is re-exported (`read`, `read_to_end`, etc.). Example: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200`.
+
+For `tokio::io::AsyncRead`, bridge with [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) (`tokio-util` feature `compat`).
+
+### Writing
+
+[`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) / [`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) are re-exported. The first write starts a background thread.
+
+```rust
+use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let mut stream = new("/dev/ttyUSB0", 115200).open()?;
+
+    stream.write_all(b"PING\r\n").await?;
+    stream.flush().await?;
+
+    if let Some(reply) = stream.try_next().await? {
+        println!("Received: {reply:?}");
+    }
+
+    Ok(())
+}
+```
+
+Example: `cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200`.
+
+For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) as above.
+
+## Builder
+
+Open with [`new(path, baud_rate)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), then chain options and call `.open()`:
+
+- `.data_bits`, `.parity`, `.stop_bits`, `.flow_control` — default is 8N1, no flow control
+- `.dtr_on_open(bool)` — set DTR on open (default: preserve existing state)
+- `.clear(ClearBuffer::Input | Output | All)` — purge driver buffers at open
+
+Types `DataBits`, `Parity`, `StopBits`, `FlowControl`, and `ClearBuffer` are exported from `serialport_stream`.
 
 ## License
 
@@ -96,4 +110,3 @@ at your option.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-

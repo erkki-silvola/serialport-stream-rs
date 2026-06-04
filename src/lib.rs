@@ -1,61 +1,32 @@
-//! # serialport-stream
+//! Async serial port I/O as [`Stream`], [`AsyncRead`], and [`AsyncWrite`].
 //!
-//! Async serial port I/O using [`futures`]: [`Stream`], [`AsyncRead`], and [`AsyncWrite`].
+//! Configure and open ports with [`new`] → [`SerialPortStreamBuilder`] → [`.open()`](SerialPortStreamBuilder::open).
+//! Line settings, DTR, and buffer clearing are applied at open time.
 //!
-//! Open and configure ports with [`SerialPortStreamBuilder`] via [`new`]. Line settings, DTR on
-//! open, and buffer clearing are applied when the port is opened; [`SerialPortStream`] then
-//! exposes only async read and write traits.
+//! POSIX `termios` on Unix; Win32 COMM APIs on Windows. Configuration types ([`DataBits`],
+//! [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) are defined in this crate.
 //!
-//! Configuration types ([`DataBits`], [`Parity`], etc.) follow the naming and semantics of
-//! [serialport](https://crates.io/crates/serialport) (serialport-rs). This crate is inspired by
-//! that API but is a separate implementation focused on async [`futures`] I/O.
+//! The first read poll starts a background thread that appends incoming bytes to an in-memory FIFO
+//! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure. The first write poll starts
+//! a separate background thread.
 //!
-//! ## Platform I/O
+//! [`Stream`] / [`TryStreamExt::try_next`] drains the full FIFO per item; [`AsyncRead`] reads
+//! partially and leaves the remainder cached. Use one read style per open port.
 //!
-//! POSIX `termios` and `ioctl` on Unix; Win32 COMM APIs on Windows. Configuration types
-//! ([`DataBits`], [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) live in this crate.
-//!
-//! ## Background threads
-//!
-//! The first read poll starts a thread that waits for incoming data and appends to an in-memory
-//! FIFO shared by [`Stream`] and [`AsyncRead`]. There is no backpressure; receive buffering grows
-//! without bound. The first write poll starts a separate thread for outbound data.
-//!
-//! ## Example
+//! [`AsyncWriteExt`], [`AsyncReadExt`], and [`TryStreamExt`] are re-exported from `futures`.
 //!
 //! ```no_run
-//! use serialport_stream::{new, ClearBuffer, DataBits, FlowControl, Parity, StopBits};
-//! use futures::io::AsyncWriteExt;
-//! use futures::stream::TryStreamExt;
+//! use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
 //!
 //! # async fn example() -> std::io::Result<()> {
-//! let mut stream = new("/dev/ttyUSB0", 115200)
-//!     .data_bits(DataBits::Eight)
-//!     .parity(Parity::None)
-//!     .stop_bits(StopBits::One)
-//!     .flow_control(FlowControl::None)
-//!     .clear(ClearBuffer::All)
-//!     .open()?;
-//!
+//! let mut stream = new("/dev/ttyUSB0", 115200).open()?;
 //! stream.write_all(b"PING\r\n").await?;
-//!
 //! while let Some(chunk) = stream.try_next().await? {
 //!     println!("{chunk:?}");
 //! }
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## Reading
-//!
-//! [`SerialPortStream`] implements [`Stream`] (each item is all bytes currently in the FIFO) and
-//! [`AsyncRead`] (partial reads from the same FIFO). Use one primary read style per open port.
-//! [`SerialPortStream::try_poll_next`] matches [`Stream::poll_next`] for manual polling.
-//!
-//! ## Writing
-//!
-//! [`AsyncWrite`] queues one buffer per in-flight `poll_write` on the write thread. Extension
-//! traits [`AsyncWriteExt`], [`AsyncReadExt`], and [`TryStreamExt`] are re-exported from `futures`.
 //!
 
 use std::future::Future;

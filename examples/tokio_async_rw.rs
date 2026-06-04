@@ -1,6 +1,4 @@
-//! Async writes using [`futures::io::AsyncWrite`] with Tokio (`#[tokio::main]`).
-//!
-//! Multiplexes Ctrl+C, incoming stream packets (`try_next`), and periodic writes in one loop.
+//! Async read/write.
 //!
 //! Run:
 //! ```text

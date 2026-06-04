@@ -58,6 +58,7 @@
 //! traits [`AsyncWriteExt`], [`AsyncReadExt`], and [`TryStreamExt`] are re-exported from `futures`.
 //!
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -247,6 +248,7 @@ impl SerialPortStreamBuilder {
             platform: PlatformStream::new(self, inner.clone(), write_inner.clone())?,
             inner,
             write_inner,
+            flush_task: None,
         })
     }
 }
@@ -313,11 +315,22 @@ pub fn new<'a>(
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
 pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
     write_inner: Arc<EventsInnerWrite>,
+    flush_task: Option<smol::Task<std::io::Result<()>>>,
+}
+
+impl std::fmt::Debug for SerialPortStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialPortStream")
+            .field("platform", &self.platform)
+            .field("inner", &self.inner)
+            .field("write_inner", &self.write_inner)
+            .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl SerialPortStream {
@@ -469,10 +482,17 @@ impl AsyncWrite for SerialPortStream {
             return Poll::Pending;
         }
 
-        // NOTE temp solution
-        match this.platform.flush_tx() {
-            Ok(()) => Poll::Ready(Ok(())),
-            Err(e) => Poll::Ready(Err(e)),
+        if this.flush_task.is_none() {
+            this.flush_task = Some(this.platform.flush_tx_unblocked());
+        }
+
+        let task = this.flush_task.as_mut().expect("flush task");
+        match Pin::new(task).poll(cx) {
+            Poll::Ready(result) => {
+                this.flush_task = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 

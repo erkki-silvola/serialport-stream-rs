@@ -178,15 +178,14 @@ pub fn configure_port(handle: HANDLE, builder: &SerialPortStreamBuilder) -> io::
     apply_line_settings(&mut dcb, builder);
     set_dcb(handle, dcb)?;
 
-    if let Some(dtr) = builder.dtr_on_open {
-        write_data_terminal_ready(handle, dtr)?;
+    if let Some(_) = builder.dtr_on_open {
+        write_data_terminal_ready(handle)?;
     }
     Ok(())
 }
 
-fn write_data_terminal_ready(handle: HANDLE, level: bool) -> io::Result<()> {
-    let function = if level { SETDTR } else { CLRDTR };
-    if unsafe { EscapeCommFunction(handle, function) } != 0 {
+fn write_data_terminal_ready(handle: HANDLE) -> io::Result<()> {
+    if unsafe { EscapeCommFunction(handle, SETDTR) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -207,8 +206,8 @@ pub fn clear(handle: HANDLE, buffer: ClearBuffer) -> io::Result<()> {
 }
 
 /// Waits until buffered transmit data has been sent (`FlushFileBuffers`).
-pub fn flush_output(handle: HANDLE) -> io::Result<()> {
-    if unsafe { FlushFileBuffers(handle) } != 0 {
+pub fn flush_output(handle: super::HandleWrapper) -> io::Result<()> {
+    if unsafe { FlushFileBuffers(handle.0) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

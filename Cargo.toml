@@ -13,6 +13,7 @@ readme = "README.md"
 
 [dependencies]
 futures = { version = "0.3", features = ["std"] }
+smol = "2"
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]

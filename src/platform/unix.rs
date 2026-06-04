@@ -45,6 +45,8 @@ impl Drop for PlatformStream {
             assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
         }
 
+        println!("read_running {read_running} write_running {write_running}");
+
         if let Some(handle) = self.read_thread_handle.take() {
             if !handle.is_finished() {
                 handle.join().unwrap();
@@ -56,6 +58,7 @@ impl Drop for PlatformStream {
                 handle.join().unwrap();
             }
         }
+        println!("all done");
     }
 }
 
@@ -94,8 +97,9 @@ impl PlatformStream {
         })
     }
 
-    pub fn flush_tx(&self) -> std::io::Result<()> {
-        serial::flush_output(self.flush_fd.as_raw_fd())
+    pub fn flush_tx_unblocked(&self) -> smol::Task<std::io::Result<()>> {
+        let fd = self.flush_fd.as_raw_fd();
+        smol::unblock(move || serial::flush_output(fd))
     }
 
     pub fn is_read_thread_started(&self) -> bool {

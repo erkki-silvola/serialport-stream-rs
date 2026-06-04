@@ -45,8 +45,6 @@ impl Drop for PlatformStream {
             assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
         }
 
-        println!("read_running {read_running} write_running {write_running}");
-
         if let Some(handle) = self.read_thread_handle.take() {
             if !handle.is_finished() {
                 handle.join().unwrap();
@@ -58,7 +56,6 @@ impl Drop for PlatformStream {
                 handle.join().unwrap();
             }
         }
-        println!("all done");
     }
 }
 

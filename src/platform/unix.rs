@@ -56,6 +56,7 @@ impl Drop for PlatformStream {
                 handle.join().unwrap();
             }
         }
+        let _ = serial::clear(self.flush_fd.as_raw_fd(), crate::ClearBuffer::Output);
     }
 }
 

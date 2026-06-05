@@ -178,14 +178,13 @@ pub fn configure_port(handle: HANDLE, builder: &SerialPortStreamBuilder) -> io::
     apply_line_settings(&mut dcb, builder);
     set_dcb(handle, dcb)?;
 
-    if let Some(_) = builder.dtr_on_open {
-        write_data_terminal_ready(handle)?;
-    }
+    set_data_terminal_ready(handle, builder.dtr_on_open)?;
     Ok(())
 }
 
-fn write_data_terminal_ready(handle: HANDLE) -> io::Result<()> {
-    if unsafe { EscapeCommFunction(handle, SETDTR) } != 0 {
+fn set_data_terminal_ready(handle: HANDLE, state: bool) -> io::Result<()> {
+    let func = if state { SETDTR } else { CLRDTR };
+    if unsafe { EscapeCommFunction(handle, func) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

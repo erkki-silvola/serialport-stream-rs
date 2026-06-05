@@ -60,9 +60,7 @@ pub fn open_port(builder: &SerialPortStreamBuilder) -> io::Result<OwnedFd> {
 
     apply_line_settings(raw, builder)?;
 
-    if let Some(_) = builder.dtr_on_open {
-        let _ = write_data_terminal_ready(raw);
-    }
+    set_data_terminal_ready(raw, builder.dtr_on_open)?;
 
     Ok(fd)
 }
@@ -336,12 +334,16 @@ fn linux_ppc_baud_constant(baud_rate: u32) -> io::Result<libc::tcflag_t> {
     Ok(speed)
 }
 
-fn write_data_terminal_ready(fd: RawFd) -> io::Result<()> {
+fn set_data_terminal_ready(fd: RawFd, state: bool) -> io::Result<()> {
     let mut status: libc::c_int = 0;
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
     let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMGET as libc::c_ulong, &mut status) };
     Errno::result(res).map_err(io::Error::from)?;
-    status |= TIOCM_DTR;
+    if state {
+        status |= TIOCM_DTR;
+    } else {
+        status &= !TIOCM_DTR;
+    }
     let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMSET as libc::c_ulong, &status) };
     Errno::result(res).map(|_| ()).map_err(io::Error::from)
 }

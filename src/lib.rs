@@ -119,7 +119,7 @@ pub struct SerialPortStreamBuilder {
     pub(crate) flow_control: FlowControl,
     pub(crate) parity: Parity,
     pub(crate) stop_bits: StopBits,
-    pub(crate) dtr_on_open: Option<bool>,
+    pub(crate) dtr_on_open: bool,
     pub(crate) clear_buffer: Option<ClearBuffer>,
 }
 
@@ -181,21 +181,14 @@ impl SerialPortStreamBuilder {
         self
     }
 
-    /// Sets the DTR (Data Terminal Ready) signal state when opening the port.
+    /// Sets the DTR (Data Terminal Ready) signal state applied when opening the port.
     ///
-    /// If not called, the DTR state is preserved from the previous port state.
+    /// `true` asserts DTR, `false` clears it. The line is always driven on open.
+    ///
+    /// Default: `false`
     #[must_use]
     pub fn dtr_on_open(mut self, state: bool) -> Self {
-        self.dtr_on_open = Some(state);
-        self
-    }
-
-    /// Preserves the current DTR state when opening the port.
-    ///
-    /// This is the default behavior.
-    #[must_use]
-    pub fn preserve_dtr_on_open(mut self) -> Self {
-        self.dtr_on_open = None;
+        self.dtr_on_open = state;
         self
     }
 
@@ -210,7 +203,7 @@ impl SerialPortStreamBuilder {
 
     /// Opens the serial port and returns a [`SerialPortStream`].
     ///
-    /// Applies line settings, optional [`dtr_on_open`](Self::dtr_on_open), and optional
+    /// Applies line settings, [`dtr_on_open`](Self::dtr_on_open), and optional
     /// [`clear`](Self::clear) before any background read/write threads are started.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let inner = Arc::new(EventsInner::new());
@@ -258,7 +251,7 @@ pub fn new<'a>(
         flow_control: FlowControl::None,
         parity: Parity::None,
         stop_bits: StopBits::One,
-        dtr_on_open: None,
+        dtr_on_open: false,
         clear_buffer: None,
     }
 }

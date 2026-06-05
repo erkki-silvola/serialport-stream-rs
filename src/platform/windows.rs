@@ -29,6 +29,19 @@ impl Overlapped {
     fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
         &mut self.0
     }
+
+    /// Prepares the structure for reuse in a new overlapped operation: clears the
+    /// status/offset fields (keeping the event handle) and resets the manual-reset
+    /// event to the non-signaled state.
+    fn reset(&mut self) -> io::Result<()> {
+        let event = self.0.hEvent;
+        self.0 = unsafe { std::mem::zeroed() };
+        self.0.hEvent = event;
+        if unsafe { ResetEvent(event as HANDLE) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Overlapped {
@@ -44,6 +57,27 @@ struct HandleWrapper(HANDLE);
 
 unsafe impl Send for HandleWrapper {}
 unsafe impl Sync for HandleWrapper {}
+
+/// RAII guard that closes a raw `HANDLE` on drop unless ownership is released
+/// via [`HandleGuard::into_raw`]. Used during construction so that any early
+/// error return closes the handles created so far instead of leaking them.
+struct HandleGuard(HANDLE);
+
+impl HandleGuard {
+    fn into_raw(self) -> HANDLE {
+        let handle = self.0;
+        std::mem::forget(self);
+        handle
+    }
+}
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct WindowsInner {
@@ -101,11 +135,13 @@ impl PlatformStream {
                 format!("Failed to open port {path} reason {err}"),
             ));
         }
+        // Guard the port handle so any early return below closes it.
+        let handle = HandleGuard(handle);
 
-        comm::configure_port(handle, &builder)?;
+        comm::configure_port(handle.0, &builder)?;
 
         if let Some(buffer) = builder.clear_buffer {
-            comm::clear(handle, buffer)?;
+            comm::clear(handle.0, buffer)?;
         }
 
         // NOTE with jlinkcdc driver on windows 11 ReadTotalTimeoutMultiplier and ReadTotalTimeoutConstant needs to be max - 1
@@ -117,7 +153,7 @@ impl PlatformStream {
             WriteTotalTimeoutConstant: 0,
         };
 
-        if unsafe { SetCommTimeouts(handle, &timeouts) } == FALSE {
+        if unsafe { SetCommTimeouts(handle.0, &timeouts) } == FALSE {
             let err = io::Error::last_os_error();
             return Err(std::io::Error::new(
                 err.kind(),
@@ -129,29 +165,33 @@ impl PlatformStream {
         if abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let abort_event = HandleWrapper(abort_event);
+        let abort_event = HandleGuard(abort_event);
 
         let write_signal_event = unsafe { CreateEventW(ptr::null(), FALSE, FALSE, ptr::null()) };
         if write_signal_event.is_null() {
             return Err(io::Error::last_os_error());
         }
+        let write_signal_event = HandleGuard(write_signal_event);
 
         let write_abort_event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
         if write_abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }
+        let write_abort_event = HandleGuard(write_abort_event);
 
+        // All fallible setup succeeded; release the guards into the struct,
+        // whose own `Drop` is now responsible for closing the handles.
         Ok(Self {
             read_thread_handle: None,
             write_thread_handle: None,
-            abort_event,
+            abort_event: HandleWrapper(abort_event.into_raw()),
             inner,
             write_inner,
             windows_inner: WindowsInner {
-                write_signal_event: HandleWrapper(write_signal_event),
-                write_abort_event: HandleWrapper(write_abort_event),
+                write_signal_event: HandleWrapper(write_signal_event.into_raw()),
+                write_abort_event: HandleWrapper(write_abort_event.into_raw()),
             },
-            port: Some(HandleWrapper(handle)),
+            port: Some(HandleWrapper(handle.into_raw())),
         })
     }
 
@@ -226,8 +266,14 @@ impl PlatformStream {
     ) -> io::Result<()> {
         let handle = read_handle.0;
 
+        // Reusable overlapped structures for the lifetime of the thread: one for the
+        // `WaitCommEvent` wait, one for the `ReadFile` in `purge_pending_data`. Reusing
+        // them (with `reset`) avoids a CreateEventW/CloseHandle pair on every event.
+        let mut event_overlapped = Overlapped::new()?;
+        let mut read_overlapped = Overlapped::new()?;
+
         // Purge any pending data first
-        Self::purge_pending_data(handle, &inner)?;
+        Self::purge_pending_data(handle, &inner, &mut read_overlapped)?;
 
         // Enable EV_RXCHAR event
         if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
@@ -235,17 +281,17 @@ impl PlatformStream {
         }
 
         loop {
-            let mut overlapped = Overlapped::new()?;
+            event_overlapped.reset()?;
             let mut mask: u32 = 0;
 
             assert_eq!(
-                unsafe { WaitCommEvent(handle, &mut mask, overlapped.as_mut_ptr()) },
+                unsafe { WaitCommEvent(handle, &mut mask, event_overlapped.as_mut_ptr()) },
                 0
             );
 
             if unsafe { GetLastError() } == ERROR_IO_PENDING {
                 // Wait for either comm event or abort signal
-                let objects = [overlapped.0.hEvent as HANDLE, abort_event.0];
+                let objects = [event_overlapped.0.hEvent as HANDLE, abort_event.0];
 
                 match unsafe {
                     WaitForMultipleObjects(
@@ -259,18 +305,18 @@ impl PlatformStream {
                         // note could check if mask == 0, but still need to wait the object signal
                         let mut len = 0;
                         if unsafe {
-                            GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut len, 1)
+                            GetOverlappedResult(handle, event_overlapped.as_mut_ptr(), &mut len, 1)
                         } == FALSE
                         {
                             return Err(io::Error::last_os_error());
                         }
-                        Self::purge_pending_data(handle, &inner)?;
+                        Self::purge_pending_data(handle, &inner, &mut read_overlapped)?;
                         continue;
                     }
                     val if val == WAIT_OBJECT_0 + 1 => {
                         // Abort signaled
                         let mut len = 0;
-                        Self::cancel_io(handle, &mut overlapped, &mut len);
+                        Self::cancel_io(handle, &mut event_overlapped, &mut len);
                         return Ok(());
                     }
                     _ => {
@@ -283,7 +329,11 @@ impl PlatformStream {
         }
     }
 
-    fn purge_pending_data(handle: HANDLE, inner: &Arc<EventsInner>) -> io::Result<()> {
+    fn purge_pending_data(
+        handle: HANDLE,
+        inner: &Arc<EventsInner>,
+        overlapped: &mut Overlapped,
+    ) -> io::Result<()> {
         let mut errors: u32 = 0;
         let mut comstat = MaybeUninit::<COMSTAT>::uninit();
 
@@ -294,7 +344,7 @@ impl PlatformStream {
         let len = unsafe { comstat.assume_init() }.cbInQue;
         if len > 0 {
             let mut buf = vec![0u8; len as usize];
-            let mut overlapped = Overlapped::new()?;
+            overlapped.reset()?;
             let mut bytes_read: u32 = 0;
 
             if unsafe {

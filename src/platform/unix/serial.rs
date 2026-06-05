@@ -60,7 +60,7 @@ pub fn open_port(builder: &SerialPortStreamBuilder) -> io::Result<OwnedFd> {
 
     apply_line_settings(raw, builder)?;
 
-    set_data_terminal_ready(raw, builder.dtr_on_open)?;
+    let _ = set_data_terminal_ready(raw, builder.dtr_on_open);
 
     Ok(fd)
 }

@@ -254,9 +254,9 @@ impl PlatformStream {
         );
     }
 
-    pub fn flush_tx_unblocked(&self) -> smol::Task<io::Result<()>> {
+    pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         let port = self.port_handle();
-        smol::unblock(move || comm::flush_output(port))
+        blocking::unblock(move || comm::flush_output(port))
     }
 
     fn receive_events(

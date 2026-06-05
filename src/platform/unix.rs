@@ -95,9 +95,9 @@ impl PlatformStream {
         })
     }
 
-    pub fn flush_tx_unblocked(&self) -> smol::Task<std::io::Result<()>> {
+    pub fn flush_tx_unblocked(&self) -> blocking::Task<std::io::Result<()>> {
         let fd = self.flush_fd.as_raw_fd();
-        smol::unblock(move || serial::flush_output(fd))
+        blocking::unblock(move || serial::flush_output(fd))
     }
 
     pub fn is_read_thread_started(&self) -> bool {

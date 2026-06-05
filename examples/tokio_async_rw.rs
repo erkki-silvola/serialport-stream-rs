@@ -58,12 +58,6 @@ async fn main() -> Result<()> {
     println!("Read / write with Async + Stream");
     println!("--------------------------------------------------------------------------------");
 
-    let mut bytes = Vec::with_capacity(100000);
-
-    for _ in 0..100000 {
-        bytes.push(0xc0);
-    }
-
     let idle_deadline = sleep_until(Instant::now() + IDLE_TIMEOUT);
     tokio::pin!(idle_deadline);
 
@@ -82,7 +76,7 @@ async fn main() -> Result<()> {
             }
 
             res = async {
-                stream.write_all(&bytes).await?;
+                stream.write_all(&WRITE_PAYLOAD).await?;
                 stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 if let Some(out) = stream.try_next().await? {

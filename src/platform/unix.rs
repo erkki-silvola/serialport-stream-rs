@@ -263,7 +263,7 @@ impl PlatformStream {
 
             let pending = write_inner.pending.lock().unwrap().clone();
 
-            let PendingWrite::Buffer(buf) = pending else {
+            let crate::PendingWrite::Buffer(buf) = pending else {
                 panic!("was waiting for PendingWrite::Buffer but got {pending:?}");
             };
 

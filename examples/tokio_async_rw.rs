@@ -73,9 +73,7 @@ async fn main() -> Result<()> {
 
             res = async {
                 stream.write_all(&bytes).await?;
-                println!("written");
                 stream.flush().await?;
-                println!("flushed");
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 if let Some(out) = stream.try_next().await? {
                     println!("received {} bytes: {:02X?}", out.len(), out);

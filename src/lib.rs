@@ -283,7 +283,7 @@ pub struct SerialPortStream {
     platform: PlatformStream,
     inner: Arc<EventsInner>,
     write_inner: Arc<EventsInnerWrite>,
-    flush_task: Option<smol::Task<std::io::Result<()>>>,
+    flush_task: Option<blocking::Task<std::io::Result<()>>>,
 }
 
 impl std::fmt::Debug for SerialPortStream {

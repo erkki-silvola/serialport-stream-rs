@@ -254,9 +254,9 @@ impl PlatformStream {
         );
     }
 
-    pub fn flush_tx_unblocked(&self) -> smol::Task<io::Result<()>> {
+    pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         let port = self.port_handle();
-        smol::unblock(move || comm::flush_output(port))
+        blocking::unblock(move || comm::flush_output(port))
     }
 
     fn receive_events(
@@ -453,6 +453,8 @@ impl PlatformStream {
                             }
                         }
                         val if val == WAIT_OBJECT_0 + 1 => {
+                            tracing::debug!("abort write");
+                            unsafe { PurgeComm(handle, PURGE_TXABORT | PURGE_TXCLEAR) };
                             let mut len = 0;
                             Self::cancel_io(handle, &mut overlapped, &mut len);
                             return Ok(());

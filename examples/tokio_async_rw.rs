@@ -56,6 +56,12 @@ async fn main() -> Result<()> {
     println!("Read / write with Async + Stream");
     println!("--------------------------------------------------------------------------------");
 
+    let mut bytes = Vec::with_capacity(10000);
+
+    for _ in 0..10000 {
+        bytes.push(0xc0);
+    }
+
     loop {
         tokio::select! {
             biased;
@@ -66,8 +72,10 @@ async fn main() -> Result<()> {
             }
 
             res = async {
-                stream.write(WRITE_PAYLOAD).await?;
+                stream.write_all(&bytes).await?;
+                println!("written");
                 stream.flush().await?;
+                println!("flushed");
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 if let Some(out) = stream.try_next().await? {
                     println!("received {} bytes: {:02X?}", out.len(), out);

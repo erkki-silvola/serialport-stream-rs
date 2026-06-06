@@ -18,6 +18,16 @@ const TIOCMGET: libc::c_int = 0x5415;
 const TIOCMSET: libc::c_int = 0x5418;
 const TIOCM_DTR: libc::c_int = 0x002;
 
+/// The integer type expected for the `request` argument of `ioctl`.
+///
+/// glibc/macOS/BSD use `c_ulong`, while musl and Android use `c_int`
+/// (exposed as `libc::Ioctl` on linux-like targets). Casting through this
+/// alias keeps the request constants well-typed on every libc.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+type IoctlRequest = libc::Ioctl;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+type IoctlRequest = libc::c_ulong;
+
 #[cfg(any(
     target_os = "android",
     all(
@@ -126,7 +136,7 @@ fn get_termios(fd: RawFd) -> io::Result<Termios> {
     ))]
     {
         let mut termios = MaybeUninit::uninit();
-        let res = unsafe { libc::ioctl(fd, TCGETS2, termios.as_mut_ptr()) };
+        let res = unsafe { libc::ioctl(fd, TCGETS2 as IoctlRequest, termios.as_mut_ptr()) };
         Errno::result(res)?;
         Ok(unsafe { termios.assume_init() })
     }
@@ -137,7 +147,7 @@ fn set_termios(fd: RawFd, termios: &libc::termios, baud_rate: u32) -> io::Result
     Errno::result(unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) })?;
     if baud_rate > 0 {
         let speed = baud_rate as libc::speed_t;
-        let res = unsafe { libc::ioctl(fd, IOSSIOSPEED as libc::c_ulong, &speed) };
+        let res = unsafe { libc::ioctl(fd, IOSSIOSPEED as IoctlRequest, &speed) };
         Errno::result(res)?;
     }
     Ok(())
@@ -171,7 +181,7 @@ fn set_termios(fd: RawFd, termios: &libc::termios2, baud_rate: u32) -> io::Resul
     let res = unsafe {
         libc::ioctl(
             fd,
-            TCSETS2,
+            TCSETS2 as IoctlRequest,
             termios as *const libc::termios2 as *mut libc::c_void,
         )
     };
@@ -337,14 +347,14 @@ fn linux_ppc_baud_constant(baud_rate: u32) -> io::Result<libc::tcflag_t> {
 fn set_data_terminal_ready(fd: RawFd, state: bool) -> io::Result<()> {
     let mut status: libc::c_int = 0;
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMGET as libc::c_ulong, &mut status) };
+    let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMGET as IoctlRequest, &mut status) };
     Errno::result(res).map_err(io::Error::from)?;
     if state {
         status |= TIOCM_DTR;
     } else {
         status &= !TIOCM_DTR;
     }
-    let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMSET as libc::c_ulong, &status) };
+    let res = unsafe { libc::ioctl(borrowed.as_raw_fd(), TIOCMSET as IoctlRequest, &status) };
     Errno::result(res).map(|_| ()).map_err(io::Error::from)
 }
 

@@ -98,6 +98,10 @@ Open with [`new(path, baud_rate)`](https://docs.rs/serialport-stream/latest/seri
 
 Types `DataBits`, `Parity`, `StopBits`, `FlowControl`, and `ClearBuffer` are exported from `serialport_stream`.
 
+## Acknowledgements
+
+Some of the platform I/O code is inspired by [serialport-rs](https://github.com/serialport/serialport-rs).
+
 ## License
 
 This project is licensed under either of:

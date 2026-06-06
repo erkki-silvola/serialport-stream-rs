@@ -286,7 +286,6 @@ impl PlatformStream {
                     .revents()
                     .is_some_and(|events| events.contains(PollFlags::POLLIN))
                 {
-                    tracing::debug!("write cancelled");
                     return Ok(());
                 }
                 if write_poll_fds[0]

@@ -6,7 +6,7 @@ Async serial port I/O as [`futures::Stream`](https://docs.rs/futures/latest/futu
 
 ```toml
 [dependencies]
-serialport-stream = "0.3.0-beta.1"
+serialport-stream = "0.3"
 ```
 
 Examples below also use `futures-lite` (blocking) or `tokio`.

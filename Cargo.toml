@@ -1,6 +1,6 @@
 [package]
 name = "serialport-stream"
-version = "0.3.0-beta.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["Erkki Silvola"]
 description = "Async Stream and AsyncRead/AsyncWrite for serial ports using platform-specific I/O"

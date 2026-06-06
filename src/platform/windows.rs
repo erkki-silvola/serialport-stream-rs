@@ -453,7 +453,6 @@ impl PlatformStream {
                             }
                         }
                         val if val == WAIT_OBJECT_0 + 1 => {
-                            tracing::debug!("abort write");
                             unsafe { PurgeComm(handle, PURGE_TXABORT | PURGE_TXCLEAR) };
                             let mut len = 0;
                             Self::cancel_io(handle, &mut overlapped, &mut len);

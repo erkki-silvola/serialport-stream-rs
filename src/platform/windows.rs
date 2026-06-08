@@ -30,14 +30,8 @@ impl Overlapped {
         &mut self.0
     }
 
-    /// Prepares the structure for reuse in a new overlapped operation: clears the
-    /// status/offset fields (keeping the event handle) and resets the manual-reset
-    /// event to the non-signaled state.
     fn reset(&mut self) -> io::Result<()> {
-        let event = self.0.hEvent;
-        self.0 = unsafe { std::mem::zeroed() };
-        self.0.hEvent = event;
-        if unsafe { ResetEvent(event as HANDLE) } == FALSE {
+        if unsafe { ResetEvent(self.0.hEvent as HANDLE) } == FALSE {
             return Err(io::Error::last_os_error());
         }
         Ok(())

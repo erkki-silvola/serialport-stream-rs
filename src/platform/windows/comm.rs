@@ -110,8 +110,8 @@ fn get_dcb(handle: HANDLE) -> io::Result<DCB> {
     }
 }
 
-fn set_dcb(handle: HANDLE, mut dcb: DCB) -> io::Result<()> {
-    if unsafe { SetCommState(handle, &mut dcb) } != 0 {
+fn set_dcb(handle: HANDLE, dcb: DCB) -> io::Result<()> {
+    if unsafe { SetCommState(handle, &dcb) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

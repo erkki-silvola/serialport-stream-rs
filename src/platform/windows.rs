@@ -7,7 +7,7 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::IO::*;
 
-use crate::{EventsInner, EventsInnerWrite, PendingWrite, SerialPortStreamBuilder};
+use crate::{EventsInnerRead, EventsInnerWrite, PendingWrite, SerialPortStreamBuilder};
 
 mod comm;
 
@@ -89,7 +89,7 @@ pub struct PlatformStream {
     read_thread_handle: Option<std::thread::JoinHandle<()>>,
     write_thread_handle: Option<std::thread::JoinHandle<()>>,
     abort_event: HandleWrapper,
-    inner: Arc<EventsInner>,
+    read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     windows_inner: WindowsInner,
     port: Option<HandleWrapper>,
@@ -102,7 +102,7 @@ impl PlatformStream {
 
     pub fn new(
         builder: SerialPortStreamBuilder,
-        inner: Arc<EventsInner>,
+        read_inner: Arc<EventsInnerRead>,
         write_inner: Arc<EventsInnerWrite>,
     ) -> io::Result<Self> {
         let path = &builder.path;
@@ -182,7 +182,7 @@ impl PlatformStream {
             read_thread_handle: None,
             write_thread_handle: None,
             abort_event,
-            inner,
+            read_inner,
             write_inner,
             windows_inner: WindowsInner {
                 write_signal_event,
@@ -203,7 +203,7 @@ impl PlatformStream {
     pub fn start_read_thread(&mut self) {
         assert!(self.read_thread_handle.is_none());
 
-        let inner_cloned = self.inner.clone();
+        let read_inner_cloned = self.read_inner.clone();
         let abort_event_cloned = self.abort_event.clone();
         let read_handle = self.port_handle();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -211,10 +211,10 @@ impl PlatformStream {
         self.read_thread_handle = Some(std::thread::spawn(move || {
             tx.send(0).unwrap();
             if let Err(e) =
-                Self::receive_events(read_handle, abort_event_cloned, inner_cloned.clone())
+                Self::receive_events(read_handle, abort_event_cloned, read_inner_cloned.clone())
             {
-                *inner_cloned.stream_error.lock().unwrap() = Some(e);
-                inner_cloned.waker.wake();
+                *read_inner_cloned.stream_error.lock().unwrap() = Some(e);
+                read_inner_cloned.waker.wake();
             }
         }));
         rx.recv().expect("Failed to start thread");
@@ -259,7 +259,7 @@ impl PlatformStream {
     fn receive_events(
         read_handle: HandleWrapper,
         abort_event: HandleWrapper,
-        inner: Arc<EventsInner>,
+        read_inner: Arc<EventsInnerRead>,
     ) -> io::Result<()> {
         let handle = read_handle.raw();
 
@@ -267,7 +267,7 @@ impl PlatformStream {
         let mut read_overlapped = Overlapped::new()?;
 
         // Purge any pending data first
-        Self::purge_pending_data(handle, &inner, &mut read_overlapped)?;
+        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
 
         // Enable EV_RXCHAR event
         if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
@@ -304,7 +304,7 @@ impl PlatformStream {
                         {
                             return Err(io::Error::last_os_error());
                         }
-                        Self::purge_pending_data(handle, &inner, &mut read_overlapped)?;
+                        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
                         continue;
                     }
                     val if val == WAIT_OBJECT_0 + 1 => {
@@ -325,7 +325,7 @@ impl PlatformStream {
 
     fn purge_pending_data(
         handle: HANDLE,
-        inner: &Arc<EventsInner>,
+        read_inner: &Arc<EventsInnerRead>,
         overlapped: &mut Overlapped,
     ) -> io::Result<()> {
         let mut errors: u32 = 0;
@@ -376,8 +376,8 @@ impl PlatformStream {
             }
 
             buf.truncate(bytes_read as usize);
-            inner.in_buffer.lock().unwrap().extend(buf);
-            inner.waker.wake();
+            read_inner.in_buffer.lock().unwrap().extend(buf);
+            read_inner.waker.wake();
         }
         Ok(())
     }

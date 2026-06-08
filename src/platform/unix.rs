@@ -7,7 +7,7 @@ use std::sync::Arc;
 use nix::libc::{c_int, ioctl, FIONREAD};
 use nix::poll::{poll, PollFd, PollFlags};
 
-use crate::{EventsInner, EventsInnerWrite, SerialPortStreamBuilder};
+use crate::{EventsInnerRead, EventsInnerWrite, SerialPortStreamBuilder};
 
 mod serial;
 
@@ -22,7 +22,7 @@ struct UnixInner {
 pub struct PlatformStream {
     read_thread_handle: Option<std::thread::JoinHandle<()>>,
     write_thread_handle: Option<std::thread::JoinHandle<()>>,
-    inner: Arc<EventsInner>,
+    read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     unix_inner: UnixInner,
     read_fd: Option<OwnedFd>,
@@ -63,7 +63,7 @@ impl Drop for PlatformStream {
 impl PlatformStream {
     pub fn new(
         builder: SerialPortStreamBuilder,
-        inner: Arc<EventsInner>,
+        read_inner: Arc<EventsInnerRead>,
         write_inner: Arc<EventsInnerWrite>,
     ) -> Result<Self, std::io::Error> {
         let port = serial::open_port(&builder)?;
@@ -86,7 +86,7 @@ impl PlatformStream {
         Ok(Self {
             read_thread_handle: None,
             write_thread_handle: None,
-            inner,
+            read_inner,
             write_inner,
             unix_inner,
             read_fd: Some(read_fd),
@@ -112,15 +112,15 @@ impl PlatformStream {
         assert!(self.read_thread_handle.is_none());
 
         let (tx, rx) = mpsc::channel();
-        let inner_cloned = self.inner.clone();
+        let read_inner_cloned = self.read_inner.clone();
         let cancel_fd = self.unix_inner.cancel_pipe.0.as_raw_fd();
         let read_fd = self.read_fd.take().unwrap();
 
         self.read_thread_handle = Some(std::thread::spawn(move || {
             tx.send(0).unwrap();
-            if let Err(err) = Self::receive_thread(&inner_cloned, read_fd, cancel_fd) {
-                *inner_cloned.stream_error.lock().unwrap() = Some(err);
-                inner_cloned.waker.wake();
+            if let Err(err) = Self::receive_thread(&read_inner_cloned, read_fd, cancel_fd) {
+                *read_inner_cloned.stream_error.lock().unwrap() = Some(err);
+                read_inner_cloned.waker.wake();
             }
         }));
         rx.recv().expect("Failed to start thread");
@@ -162,7 +162,7 @@ impl PlatformStream {
     }
 
     fn receive_thread(
-        inner: &Arc<EventsInner>,
+        read_inner: &Arc<EventsInnerRead>,
         read_fd: OwnedFd,
         cancel_fd: i32,
     ) -> std::io::Result<()> {
@@ -183,8 +183,8 @@ impl PlatformStream {
                 };
                 if did_read > 0 {
                     buffer.truncate(did_read);
-                    inner.in_buffer.lock().unwrap().extend(buffer);
-                    inner.waker.wake();
+                    read_inner.in_buffer.lock().unwrap().extend(buffer);
+                    read_inner.waker.wake();
                 }
             }
             Ok(())

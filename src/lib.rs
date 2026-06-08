@@ -48,13 +48,13 @@ pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
 
 #[derive(Debug)]
-pub(crate) struct EventsInner {
+pub(crate) struct EventsInnerRead {
     pub(crate) in_buffer: Mutex<Vec<u8>>,
     pub(crate) stream_error: Mutex<Option<std::io::Error>>,
     pub(crate) waker: AtomicWaker,
 }
 
-impl EventsInner {
+impl EventsInnerRead {
     pub(crate) fn new() -> Self {
         Self {
             in_buffer: Mutex::new(Vec::new()),
@@ -206,11 +206,11 @@ impl SerialPortStreamBuilder {
     /// Applies line settings, [`dtr_on_open`](Self::dtr_on_open), and optional
     /// [`clear`](Self::clear) before any background read/write threads are started.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
-        let inner = Arc::new(EventsInner::new());
+        let read_inner = Arc::new(EventsInnerRead::new());
         let write_inner = Arc::new(EventsInnerWrite::new());
         Ok(SerialPortStream {
-            platform: PlatformStream::new(self, inner.clone(), write_inner.clone())?,
-            inner,
+            platform: PlatformStream::new(self, read_inner.clone(), write_inner.clone())?,
+            read_inner,
             write_inner,
             flush_task: None,
         })
@@ -281,7 +281,7 @@ pub fn new<'a>(
 /// ```
 pub struct SerialPortStream {
     platform: PlatformStream,
-    inner: Arc<EventsInner>,
+    read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
 }
@@ -290,7 +290,7 @@ impl std::fmt::Debug for SerialPortStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SerialPortStream")
             .field("platform", &self.platform)
-            .field("inner", &self.inner)
+            .field("read_inner", &self.read_inner)
             .field("write_inner", &self.write_inner)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
             .finish()
@@ -299,9 +299,9 @@ impl std::fmt::Debug for SerialPortStream {
 
 impl SerialPortStream {
     fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        self.inner.waker.register(cx.waker());
+        self.read_inner.waker.register(cx.waker());
 
-        if let Some(err) = self.inner.stream_error.lock().unwrap().as_ref() {
+        if let Some(err) = self.read_inner.stream_error.lock().unwrap().as_ref() {
             return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
         }
 
@@ -339,7 +339,7 @@ impl SerialPortStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
             Poll::Ready(Ok(())) => {
-                let mut buffer = self.inner.in_buffer.lock().unwrap();
+                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
                 if !buffer.is_empty() {
                     // Drain all available data
                     let data = buffer.drain(..).collect();
@@ -368,7 +368,7 @@ impl AsyncRead for SerialPortStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(())) => {
-                let mut buffer = this.inner.in_buffer.lock().unwrap();
+                let mut buffer = this.read_inner.in_buffer.lock().unwrap();
                 if buffer.is_empty() {
                     return Poll::Pending;
                 }

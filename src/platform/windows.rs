@@ -263,9 +263,6 @@ impl PlatformStream {
     ) -> io::Result<()> {
         let handle = read_handle.raw();
 
-        // Reusable overlapped structures for the lifetime of the thread: one for the
-        // `WaitCommEvent` wait, one for the `ReadFile` in `purge_pending_data`. Reusing
-        // them (with `reset`) avoids a CreateEventW/CloseHandle pair on every event.
         let mut event_overlapped = Overlapped::new()?;
         let mut read_overlapped = Overlapped::new()?;
 
@@ -487,8 +484,5 @@ impl Drop for PlatformStream {
                 handle.join().unwrap();
             }
         }
-
-        // The raw handles are closed automatically when the `HandleWrapper`
-        // fields drop after this function returns.
     }
 }

@@ -131,7 +131,7 @@ impl PlatformStream {
             let err = io::Error::last_os_error();
             return Err(std::io::Error::new(
                 err.kind(),
-                format!("Failed to open port {path} reason {err}"),
+                format!("failed to open port {path}: {err}"),
             ));
         }
         // Wrap the port handle so any early return below closes it on drop.
@@ -156,7 +156,7 @@ impl PlatformStream {
             let err = io::Error::last_os_error();
             return Err(std::io::Error::new(
                 err.kind(),
-                format!("SetCommTimeouts failed reason {err}"),
+                format!("SetCommTimeouts failed: {err}"),
             ));
         }
 
@@ -405,9 +405,12 @@ impl PlatformStream {
                 _ => return Err(io::Error::last_os_error()),
             }
 
-            let pending = write_inner.pending.lock().unwrap().clone();
-            let PendingWrite::Buffer(buf) = pending else {
-                panic!("was waiting for PendingWrite::Buffer but got {pending:?}");
+            let buf = {
+                let mut pending = write_inner.pending.lock().unwrap();
+                match &mut *pending {
+                    PendingWrite::Buffer(buf) => std::mem::take(buf),
+                    other => panic!("was waiting for PendingWrite::Buffer but got {other:?}"),
+                }
             };
 
             let mut overlapped = Overlapped::new()?;

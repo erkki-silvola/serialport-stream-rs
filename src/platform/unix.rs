@@ -262,10 +262,12 @@ impl PlatformStream {
                 assert_eq!(nix::unistd::read(write_signal_fd_, &mut buffer).unwrap(), 1);
             }
 
-            let pending = write_inner.pending.lock().unwrap().clone();
-
-            let crate::PendingWrite::Buffer(buf) = pending else {
-                panic!("was waiting for PendingWrite::Buffer but got {pending:?}");
+            let buf = {
+                let mut pending = write_inner.pending.lock().unwrap();
+                match &mut *pending {
+                    crate::PendingWrite::Buffer(buf) => std::mem::take(buf),
+                    other => panic!("was waiting for PendingWrite::Buffer but got {other:?}"),
+                }
             };
 
             loop {

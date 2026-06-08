@@ -43,6 +43,13 @@ pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 use crate::platform::PlatformStream;
 use futures::task::AtomicWaker;
 
+fn clone_io_error(err: &std::io::Error) -> std::io::Error {
+    match err.raw_os_error() {
+        Some(code) => std::io::Error::from_raw_os_error(code),
+        None => std::io::Error::new(err.kind(), err.to_string()),
+    }
+}
+
 pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
@@ -302,7 +309,7 @@ impl SerialPortStream {
         self.read_inner.waker.register(cx.waker());
 
         if let Some(err) = self.read_inner.stream_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
+            return Poll::Ready(Err(clone_io_error(err)));
         }
 
         if !self.platform.is_read_thread_started() {
@@ -317,7 +324,7 @@ impl SerialPortStream {
         self.write_inner.waker.register(cx.waker());
 
         if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
-            return Err(std::io::Error::new(err.kind(), err.to_string()));
+            return Err(clone_io_error(err));
         }
 
         if !self.platform.is_write_thread_started() {
@@ -436,7 +443,7 @@ impl AsyncWrite for SerialPortStream {
         this.write_inner.waker.register(cx.waker());
 
         if let Some(err) = this.write_inner.write_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Err(std::io::Error::new(err.kind(), err.to_string())));
+            return Poll::Ready(Err(clone_io_error(err)));
         }
 
         if matches!(

@@ -46,30 +46,35 @@ impl Drop for Overlapped {
     }
 }
 
-#[derive(Debug, Clone)]
-struct HandleWrapper(HANDLE);
+/// Sole owner of a raw `HANDLE`; closes it via `CloseHandle` on drop.
+#[derive(Debug)]
+struct OwnedHandle(HANDLE);
 
-unsafe impl Send for HandleWrapper {}
-unsafe impl Sync for HandleWrapper {}
+unsafe impl Send for OwnedHandle {}
+unsafe impl Sync for OwnedHandle {}
 
-/// RAII guard that closes a raw `HANDLE` on drop unless ownership is released
-/// via [`HandleGuard::into_raw`]. Used during construction so that any early
-/// error return closes the handles created so far instead of leaking them.
-struct HandleGuard(HANDLE);
-
-impl HandleGuard {
-    fn into_raw(self) -> HANDLE {
-        let handle = self.0;
-        std::mem::forget(self);
-        handle
-    }
-}
-
-impl Drop for HandleGuard {
+impl Drop for OwnedHandle {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.0);
         }
+    }
+}
+
+/// Reference-counted RAII wrapper around a raw `HANDLE`. The handle is closed
+/// when the last clone is dropped, so handles created during construction are
+/// released automatically on any early error return (no manual cleanup needed),
+/// and cloning into worker threads keeps the handle alive for as long as needed.
+#[derive(Debug, Clone)]
+struct HandleWrapper(Arc<OwnedHandle>);
+
+impl HandleWrapper {
+    fn new(handle: HANDLE) -> Self {
+        Self(Arc::new(OwnedHandle(handle)))
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0 .0
     }
 }
 
@@ -129,13 +134,13 @@ impl PlatformStream {
                 format!("Failed to open port {path} reason {err}"),
             ));
         }
-        // Guard the port handle so any early return below closes it.
-        let handle = HandleGuard(handle);
+        // Wrap the port handle so any early return below closes it on drop.
+        let port = HandleWrapper::new(handle);
 
-        comm::configure_port(handle.0, &builder)?;
+        comm::configure_port(port.raw(), &builder)?;
 
         if let Some(buffer) = builder.clear_buffer {
-            comm::clear(handle.0, buffer)?;
+            comm::clear(port.raw(), buffer)?;
         }
 
         // NOTE with jlinkcdc driver on windows 11 ReadTotalTimeoutMultiplier and ReadTotalTimeoutConstant needs to be max - 1
@@ -147,7 +152,7 @@ impl PlatformStream {
             WriteTotalTimeoutConstant: 0,
         };
 
-        if unsafe { SetCommTimeouts(handle.0, &timeouts) } == FALSE {
+        if unsafe { SetCommTimeouts(port.raw(), &timeouts) } == FALSE {
             let err = io::Error::last_os_error();
             return Err(std::io::Error::new(
                 err.kind(),
@@ -159,33 +164,31 @@ impl PlatformStream {
         if abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let abort_event = HandleGuard(abort_event);
+        let abort_event = HandleWrapper::new(abort_event);
 
         let write_signal_event = unsafe { CreateEventW(ptr::null(), FALSE, FALSE, ptr::null()) };
         if write_signal_event.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let write_signal_event = HandleGuard(write_signal_event);
+        let write_signal_event = HandleWrapper::new(write_signal_event);
 
         let write_abort_event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
         if write_abort_event.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let write_abort_event = HandleGuard(write_abort_event);
+        let write_abort_event = HandleWrapper::new(write_abort_event);
 
-        // All fallible setup succeeded; release the guards into the struct,
-        // whose own `Drop` is now responsible for closing the handles.
         Ok(Self {
             read_thread_handle: None,
             write_thread_handle: None,
-            abort_event: HandleWrapper(abort_event.into_raw()),
+            abort_event,
             inner,
             write_inner,
             windows_inner: WindowsInner {
-                write_signal_event: HandleWrapper(write_signal_event.into_raw()),
-                write_abort_event: HandleWrapper(write_abort_event.into_raw()),
+                write_signal_event,
+                write_abort_event,
             },
-            port: Some(HandleWrapper(handle.into_raw())),
+            port: Some(port),
         })
     }
 
@@ -243,7 +246,7 @@ impl PlatformStream {
 
     pub fn signal_write(&self) {
         assert_eq!(
-            unsafe { SetEvent(self.windows_inner.write_signal_event.0) },
+            unsafe { SetEvent(self.windows_inner.write_signal_event.raw()) },
             TRUE
         );
     }
@@ -258,7 +261,7 @@ impl PlatformStream {
         abort_event: HandleWrapper,
         inner: Arc<EventsInner>,
     ) -> io::Result<()> {
-        let handle = read_handle.0;
+        let handle = read_handle.raw();
 
         // Reusable overlapped structures for the lifetime of the thread: one for the
         // `WaitCommEvent` wait, one for the `ReadFile` in `purge_pending_data`. Reusing
@@ -285,7 +288,7 @@ impl PlatformStream {
 
             if unsafe { GetLastError() } == ERROR_IO_PENDING {
                 // Wait for either comm event or abort signal
-                let objects = [event_overlapped.0.hEvent as HANDLE, abort_event.0];
+                let objects = [event_overlapped.0.hEvent as HANDLE, abort_event.raw()];
 
                 match unsafe {
                     WaitForMultipleObjects(
@@ -393,10 +396,10 @@ impl PlatformStream {
         write_signal_event: HandleWrapper,
         write_abort_event: HandleWrapper,
     ) -> io::Result<()> {
-        let handle = write_handle.0;
+        let handle = write_handle.raw();
 
         loop {
-            let objects = [write_signal_event.0, write_abort_event.0];
+            let objects = [write_signal_event.raw(), write_abort_event.raw()];
             match unsafe {
                 WaitForMultipleObjects(objects.len() as u32, objects.as_ptr(), 0, INFINITE)
             } {
@@ -424,7 +427,7 @@ impl PlatformStream {
             } == FALSE
             {
                 if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    let wait_objects = [overlapped.0.hEvent as HANDLE, write_abort_event.0];
+                    let wait_objects = [overlapped.0.hEvent as HANDLE, write_abort_event.raw()];
                     match unsafe {
                         WaitForMultipleObjects(
                             wait_objects.len() as u32,
@@ -470,7 +473,7 @@ impl Drop for PlatformStream {
     fn drop(&mut self) {
         if let Some(handle) = self.read_thread_handle.take() {
             if !handle.is_finished() {
-                assert_eq!(unsafe { SetEvent(self.abort_event.0) }, TRUE);
+                assert_eq!(unsafe { SetEvent(self.abort_event.raw()) }, TRUE);
                 handle.join().unwrap();
             }
         }
@@ -478,20 +481,14 @@ impl Drop for PlatformStream {
         if let Some(handle) = self.write_thread_handle.take() {
             if !handle.is_finished() {
                 assert_eq!(
-                    unsafe { SetEvent(self.windows_inner.write_abort_event.0) },
+                    unsafe { SetEvent(self.windows_inner.write_abort_event.raw()) },
                     TRUE
                 );
                 handle.join().unwrap();
             }
         }
 
-        unsafe {
-            CloseHandle(self.abort_event.0);
-            CloseHandle(self.windows_inner.write_signal_event.0);
-            CloseHandle(self.windows_inner.write_abort_event.0);
-            if let Some(port) = self.port.take() {
-                CloseHandle(port.0);
-            }
-        }
+        // The raw handles are closed automatically when the `HandleWrapper`
+        // fields drop after this function returns.
     }
 }

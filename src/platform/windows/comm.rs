@@ -206,7 +206,7 @@ pub fn clear(handle: HANDLE, buffer: ClearBuffer) -> io::Result<()> {
 
 /// Waits until buffered transmit data has been sent (`FlushFileBuffers`).
 pub fn flush_output(handle: super::HandleWrapper) -> io::Result<()> {
-    if unsafe { FlushFileBuffers(handle.0) } != 0 {
+    if unsafe { FlushFileBuffers(handle.raw()) } != 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())

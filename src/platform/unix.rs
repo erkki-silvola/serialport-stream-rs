@@ -146,9 +146,7 @@ impl PlatformStream {
             match nix::unistd::write(fd, buf) {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(nix::errno::Errno::EINTR) => continue,
-                Err(nix::errno::Errno::EAGAIN) => {
-                    return Poll::Pending
-                },
+                Err(nix::errno::Errno::EAGAIN) => return Poll::Pending,
                 Err(e) => return Poll::Ready(Err(std::io::Error::from(e))),
             }
         }

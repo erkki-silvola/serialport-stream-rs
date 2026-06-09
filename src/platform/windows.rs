@@ -512,7 +512,7 @@ impl PlatformStream {
                 val if val == WAIT_OBJECT_0 + 1 => {
                     unsafe { PurgeComm(handle, PURGE_TXABORT | PURGE_TXCLEAR) };
                     let mut len = 0;
-                    let _ = unsafe { CancelIo(handle) };
+                    let _ = unsafe { CancelIoEx(handle, overlapped_ptr) };
                     let _ = unsafe { GetOverlappedResult(handle, overlapped_ptr, &mut len, TRUE) };
                     *write_shared.state.lock().unwrap() = WriteState::Idle;
                     return Ok(());

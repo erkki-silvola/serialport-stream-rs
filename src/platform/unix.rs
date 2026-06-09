@@ -16,6 +16,7 @@ mod serial;
 #[derive(Debug)]
 struct UnixInner {
     cancel_pipe: (OwnedFd, OwnedFd),
+    write_signal_pipe: (OwnedFd, OwnedFd),
 }
 
 #[derive(Debug)]
@@ -77,7 +78,11 @@ impl PlatformStream {
         drop(port);
 
         let cancel_pipe = nix::unistd::pipe().unwrap();
-        let unix_inner = UnixInner { cancel_pipe };
+        let write_signal_pipe = nix::unistd::pipe().unwrap();
+        let unix_inner = UnixInner {
+            cancel_pipe,
+            write_signal_pipe,
+        };
 
         Ok(Self {
             read_thread_handle: None,
@@ -128,11 +133,14 @@ impl PlatformStream {
         let (tx, rx) = mpsc::channel();
         let write_inner_cloned = self.write_inner.clone();
         let cancel_fd = self.unix_inner.cancel_pipe.0.as_raw_fd();
+        let write_signal_fd = self.unix_inner.write_signal_pipe.0.as_raw_fd();
         let write_fd = self.write_fd.as_raw_fd();
 
         self.write_thread_handle = Some(std::thread::spawn(move || {
             tx.send(0).unwrap();
-            if let Err(err) = Self::write_thread(&write_inner_cloned, write_fd, cancel_fd) {
+            if let Err(err) =
+                Self::write_thread(&write_inner_cloned, write_fd, write_signal_fd, cancel_fd)
+            {
                 *write_inner_cloned.write_error.lock().unwrap() = Some(err);
                 write_inner_cloned.waker.wake();
             }
@@ -146,10 +154,18 @@ impl PlatformStream {
             match nix::unistd::write(fd, buf) {
                 Ok(n) => return Poll::Ready(Ok(n)),
                 Err(nix::errno::Errno::EINTR) => continue,
-                Err(nix::errno::Errno::EAGAIN) => return Poll::Pending,
+                Err(nix::errno::Errno::EAGAIN) => {
+                    self.signal_write();
+                    return Poll::Pending;
+                }
                 Err(e) => return Poll::Ready(Err(std::io::Error::from(e))),
             }
         }
+    }
+
+    fn signal_write(&self) {
+        let fd = self.unix_inner.write_signal_pipe.1.as_fd();
+        assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
     }
 
     fn bytes_to_read_fd(fd: BorrowedFd<'_>) -> std::io::Result<u32> {
@@ -173,13 +189,16 @@ impl PlatformStream {
             let bytes_count = Self::bytes_to_read_fd(borrowed_fd)?;
             if bytes_count > 0 {
                 let mut buffer = vec![0u8; bytes_count as usize];
-                let did_read = match nix::unistd::read(borrowed_fd, &mut buffer) {
-                    Ok(n) => n,
-                    Err(nix::errno::Errno::EAGAIN) => {
-                        tracing::info!("EAGAIN for read");
-                        0
+                let did_read = loop {
+                    match nix::unistd::read(borrowed_fd, &mut buffer) {
+                        Ok(n) => break n,
+                        Err(nix::errno::Errno::EINTR) => continue,
+                        Err(nix::errno::Errno::EAGAIN) => {
+                            tracing::info!("EAGAIN for read");
+                            break 0;
+                        }
+                        Err(e) => return Err(std::io::Error::from(e)),
                     }
-                    Err(e) => return Err(std::io::Error::from(e)),
                 };
                 if did_read > 0 {
                     buffer.truncate(did_read);
@@ -201,9 +220,6 @@ impl PlatformStream {
             ];
 
             let poll_result = poll(&mut poll_fds, nix::poll::PollTimeout::NONE)?;
-            if poll_result == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
             assert!(poll_result != 0);
 
             if poll_fds[1]
@@ -227,9 +243,35 @@ impl PlatformStream {
     fn write_thread(
         write_inner: &Arc<EventsInnerWrite>,
         write_fd_raw: i32,
+        write_signal_fd: i32,
         cancel_fd: i32,
     ) -> std::io::Result<()> {
         loop {
+            let write_signal_fd_ = unsafe { BorrowedFd::borrow_raw(write_signal_fd) };
+            let cancel_fd_ = unsafe { BorrowedFd::borrow_raw(cancel_fd) };
+            let mut wait_poll_fds = [
+                PollFd::new(write_signal_fd_, PollFlags::POLLIN),
+                PollFd::new(cancel_fd_, PollFlags::POLLIN),
+            ];
+
+            let poll_result = poll(&mut wait_poll_fds, nix::poll::PollTimeout::NONE)?;
+            assert!(poll_result != 0);
+
+            if wait_poll_fds[1]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+            {
+                return Ok(());
+            }
+
+            if wait_poll_fds[0]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+            {
+                let mut buffer = [0u8; 1];
+                assert_eq!(nix::unistd::read(write_signal_fd_, &mut buffer).unwrap(), 1);
+            }
+
             let write_fd_ = unsafe { BorrowedFd::borrow_raw(write_fd_raw) };
             let cancel_fd_ = unsafe { BorrowedFd::borrow_raw(cancel_fd) };
             let mut write_poll_fds = [
@@ -238,16 +280,12 @@ impl PlatformStream {
             ];
 
             let poll_result = poll(&mut write_poll_fds, nix::poll::PollTimeout::NONE)?;
-            if poll_result == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
             assert!(poll_result != 0);
 
             if write_poll_fds[1]
                 .revents()
                 .is_some_and(|events| events.contains(PollFlags::POLLIN))
             {
-                // cancel
                 return Ok(());
             }
             if write_poll_fds[0]

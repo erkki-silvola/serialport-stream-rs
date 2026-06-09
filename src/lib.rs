@@ -8,7 +8,10 @@
 //!
 //! The first read poll starts a background thread that appends incoming bytes to an in-memory FIFO
 //! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure. The first write poll starts
-//! a separate background thread.
+//! a separate background thread. The write is always issued directly from the caller's buffer (no
+//! copy): on Unix the background thread only notifies the task when the port becomes writable again
+//! after `EAGAIN`; on Windows the overlapped `WriteFile` is issued during the poll and the thread
+//! awaits its completion.
 //!
 //! [`Stream`] / [`TryStreamExt::try_next`] drains the full FIFO per item; [`AsyncRead`] reads
 //! partially and leaves the remainder cached. Use one read style per open port.
@@ -71,16 +74,8 @@ impl EventsInnerRead {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum PendingWrite {
-    Idle,
-    Buffer(Vec<u8>),
-    Completed(usize),
-}
-
 #[derive(Debug)]
 pub(crate) struct EventsInnerWrite {
-    pub(crate) pending: Mutex<PendingWrite>,
     pub(crate) write_error: Mutex<Option<std::io::Error>>,
     pub(crate) waker: AtomicWaker,
 }
@@ -88,7 +83,6 @@ pub(crate) struct EventsInnerWrite {
 impl EventsInnerWrite {
     pub(crate) fn new() -> Self {
         Self {
-            pending: Mutex::new(PendingWrite::Idle),
             write_error: Mutex::new(None),
             waker: AtomicWaker::new(),
         }
@@ -220,6 +214,7 @@ impl SerialPortStreamBuilder {
             read_inner,
             write_inner,
             flush_task: None,
+            write_in_flight: false,
         })
     }
 }
@@ -291,6 +286,7 @@ pub struct SerialPortStream {
     read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
+    write_in_flight: bool,
 }
 
 impl std::fmt::Debug for SerialPortStream {
@@ -300,6 +296,7 @@ impl std::fmt::Debug for SerialPortStream {
             .field("read_inner", &self.read_inner)
             .field("write_inner", &self.write_inner)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
+            .field("write_in_flight", &self.write_in_flight)
             .finish()
     }
 }
@@ -412,29 +409,13 @@ impl AsyncWrite for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        match this.poll_writer_ready(cx) {
+        let result = match this.poll_writer_ready(cx) {
             Err(e) => Poll::Ready(Err(e)),
-            Ok(()) => {
-                let mut pending = this.write_inner.pending.lock().unwrap();
-                match *pending {
-                    crate::PendingWrite::Idle => {
-                        // new transaction
-                        *pending = crate::PendingWrite::Buffer(buf.to_vec());
-                        drop(pending);
-                        self.platform.signal_write();
-                        Poll::Pending
-                    }
-                    crate::PendingWrite::Buffer(_) => {
-                        // write still pending
-                        Poll::Pending
-                    }
-                    crate::PendingWrite::Completed(n) => {
-                        *pending = crate::PendingWrite::Idle;
-                        Poll::Ready(Ok(n))
-                    }
-                }
-            }
-        }
+            Ok(()) => this.platform.poll_write(buf),
+        };
+        // A pending write has been started but not yet finished; `poll_flush` waits on this.
+        this.write_in_flight = result.is_pending();
+        result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -446,10 +427,7 @@ impl AsyncWrite for SerialPortStream {
             return Poll::Ready(Err(clone_io_error(err)));
         }
 
-        if matches!(
-            *this.write_inner.pending.lock().unwrap(),
-            crate::PendingWrite::Buffer(_)
-        ) {
+        if this.write_in_flight {
             return Poll::Pending;
         }
 

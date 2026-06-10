@@ -66,8 +66,6 @@ pub fn open_port(builder: &SerialPortStreamBuilder) -> io::Result<OwnedFd> {
     unsafe { libc::cfmakeraw(&mut termios) };
     Errno::result(unsafe { libc::tcsetattr(raw, libc::TCSANOW, &termios) })?;
 
-    fcntl(&fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(io::Error::from)?;
-
     apply_line_settings(raw, builder)?;
 
     let _ = set_data_terminal_ready(raw, builder.dtr_on_open);

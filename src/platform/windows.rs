@@ -335,9 +335,10 @@ impl PlatformStream {
 
         let mut event_overlapped = Overlapped::new()?;
         let mut read_overlapped = Overlapped::new()?;
+        let mut buffer = Vec::with_capacity(1024);
 
         // Purge any pending data first
-        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
+        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped, &mut buffer)?;
 
         // Enable EV_RXCHAR event
         if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
@@ -374,7 +375,12 @@ impl PlatformStream {
                         {
                             return Err(io::Error::last_os_error());
                         }
-                        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
+                        Self::purge_pending_data(
+                            handle,
+                            &read_inner,
+                            &mut read_overlapped,
+                            &mut buffer,
+                        )?;
                         continue;
                     }
                     val if val == WAIT_OBJECT_0 + 1 => {
@@ -397,6 +403,7 @@ impl PlatformStream {
         handle: HANDLE,
         read_inner: &Arc<EventsInnerRead>,
         overlapped: &mut Overlapped,
+        buffer: &mut Vec<u8>,
     ) -> io::Result<()> {
         let mut errors: u32 = 0;
         let mut comstat = MaybeUninit::<COMSTAT>::uninit();
@@ -407,15 +414,15 @@ impl PlatformStream {
 
         let len = unsafe { comstat.assume_init() }.cbInQue;
         if len > 0 {
-            let mut buf = vec![0u8; len as usize];
+            buffer.resize(len as usize, 0);
             overlapped.reset()?;
             let mut bytes_read: u32 = 0;
 
             if unsafe {
                 ReadFile(
                     handle,
-                    buf.as_mut_ptr() as *mut _,
-                    buf.len() as u32,
+                    buffer.as_mut_ptr() as *mut _,
+                    buffer.len() as u32,
                     &mut bytes_read,
                     overlapped.as_mut_ptr(),
                 )
@@ -445,8 +452,9 @@ impl PlatformStream {
                 }
             }
 
-            buf.truncate(bytes_read as usize);
-            read_inner.in_buffer.lock().unwrap().extend(buf);
+            buffer.truncate(bytes_read as usize);
+            read_inner.in_buffer.lock().unwrap().extend_from_slice(buffer);
+            buffer.clear();
             read_inner.waker.wake();
         }
         Ok(())

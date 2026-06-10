@@ -183,14 +183,15 @@ impl PlatformStream {
         cancel_fd: i32,
     ) -> std::io::Result<()> {
         let read_fd_raw = read_fd.as_raw_fd();
+        let mut buffer = Vec::with_capacity(1024);
 
-        let purge_pending_data = || -> std::io::Result<()> {
+        let purge_pending_data = |buffer: &mut Vec<u8>| -> std::io::Result<()> {
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(read_fd_raw) };
             let bytes_count = Self::bytes_to_read_fd(borrowed_fd)?;
             if bytes_count > 0 {
-                let mut buffer = vec![0u8; bytes_count as usize];
+                buffer.resize(bytes_count as usize, 0);
                 let did_read = loop {
-                    match nix::unistd::read(borrowed_fd, &mut buffer) {
+                    match nix::unistd::read(borrowed_fd, buffer) {
                         Ok(n) => break n,
                         Err(nix::errno::Errno::EINTR) => continue,
                         Err(nix::errno::Errno::EAGAIN) => {
@@ -202,14 +203,15 @@ impl PlatformStream {
                 };
                 if did_read > 0 {
                     buffer.truncate(did_read);
-                    read_inner.in_buffer.lock().unwrap().extend(buffer);
+                    read_inner.in_buffer.lock().unwrap().extend_from_slice(buffer);
+                    buffer.clear();
                     read_inner.waker.wake();
                 }
             }
             Ok(())
         };
 
-        purge_pending_data()?;
+        purge_pending_data(&mut buffer)?;
 
         loop {
             let read_fd_ = unsafe { BorrowedFd::borrow_raw(read_fd_raw) };
@@ -232,7 +234,7 @@ impl PlatformStream {
 
             if let Some(read_poll) = poll_fds[0].revents() {
                 if read_poll.contains(PollFlags::POLLIN) {
-                    purge_pending_data()?;
+                    purge_pending_data(&mut buffer)?;
                 } else {
                     return Err(std::io::Error::other("read fd events != POLLIN"));
                 }

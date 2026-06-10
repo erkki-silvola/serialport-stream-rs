@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             }
 
             res = async {
-                stream.write_all(&WRITE_PAYLOAD).await?;
+                stream.write_all(WRITE_PAYLOAD).await?;
                 stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 if let Some(out) = stream.try_next().await? {

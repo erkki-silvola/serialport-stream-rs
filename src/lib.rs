@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 mod platform;
-mod types;
+pub mod types;
 
 pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};

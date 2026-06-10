@@ -203,7 +203,11 @@ impl PlatformStream {
                 };
                 if did_read > 0 {
                     buffer.truncate(did_read);
-                    read_inner.in_buffer.lock().unwrap().extend_from_slice(buffer);
+                    read_inner
+                        .in_buffer
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(buffer);
                     buffer.clear();
                     read_inner.waker.wake();
                 }

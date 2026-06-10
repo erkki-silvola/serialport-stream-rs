@@ -5,7 +5,7 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, open, FcntlArg, OFlag};
+use nix::fcntl::{open, OFlag};
 use nix::libc;
 use nix::sys::stat::Mode;
 use nix::sys::termios;

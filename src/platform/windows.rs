@@ -453,7 +453,11 @@ impl PlatformStream {
             }
 
             buffer.truncate(bytes_read as usize);
-            read_inner.in_buffer.lock().unwrap().extend_from_slice(buffer);
+            read_inner
+                .in_buffer
+                .lock()
+                .unwrap()
+                .extend_from_slice(buffer);
             buffer.clear();
             read_inner.waker.wake();
         }

@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
 
     let stream = serialport_stream::new(port_name, baud_rate)
         .dtr_on_open(true)
-        .data_bits(serialport_stream::types::DataBits::Eight)
+        .data_bits(serialport_stream::DataBits::Eight)
         .open()?;
 
     let (abort_handle, abort_registration) = AbortHandle::new_pair();

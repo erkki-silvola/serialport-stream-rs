@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-xx-xx
+
+##### Changed
+
+* `AsyncWrite::poll_write` writes directly from the caller's buffer (no intermediate copy). On Unix, the background thread only wakes the task when the port is writable again after `EAGAIN`; on Windows, overlapped `WriteFile` starts during the poll and the thread awaits completion.
+* Windows serial handle ownership refactored to RAII (`OwnedHandle` / `Arc`) so drop no longer double-closes handles.
+
+##### Fixed
+
+* Unix read/write retry on `EINTR`.
+* Windows in-flight write cancellation uses `CancelIoEx`.
+* Propagated read/write errors preserve the original raw OS error code when available.
+
 ## [0.3.0] - 2026-06-06
 
 ##### Fixed

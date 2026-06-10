@@ -10,10 +10,8 @@ use anyhow::Result;
 use clap::{Arg, Command};
 use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
 use tokio::signal::ctrl_c;
-use tokio::time::{sleep_until, Duration, Instant};
 
 const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
-const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,9 +56,6 @@ async fn main() -> Result<()> {
     println!("Read / write with Async + Stream");
     println!("--------------------------------------------------------------------------------");
 
-    let idle_deadline = sleep_until(Instant::now() + IDLE_TIMEOUT);
-    tokio::pin!(idle_deadline);
-
     loop {
         tokio::select! {
             biased;
@@ -70,31 +65,18 @@ async fn main() -> Result<()> {
                 break;
             }
 
-            _ = &mut idle_deadline => {
-                println!("\nNo activity for {:?} — exiting", IDLE_TIMEOUT);
-                break;
-            }
-
             res = async {
-                stream.write_all(&WRITE_PAYLOAD).await?;
+                stream.write_all(WRITE_PAYLOAD).await?;
                 stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 if let Some(out) = stream.try_next().await? {
                     println!("received {} bytes: {:02X?}", out.len(), out);
-                    return Ok::<bool, anyhow::Error>(true);
                 }
-                Ok::<bool, anyhow::Error>(false)
+                Ok::<(), anyhow::Error>(())
             } => {
-                match res {
-                    Ok(activity) => {
-                        if activity {
-                            idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("read/write error: {e}");
-                        break;
-                    }
+                if let Err(e) = res {
+                    eprintln!("read/write error: {e}");
+                    break;
                 }
             }
         }

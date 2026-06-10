@@ -1,5 +1,6 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::{mem::MaybeUninit, ptr};
 use windows_sys::Win32::Devices::Communication::*;
 use windows_sys::Win32::Foundation::*;
@@ -7,7 +8,7 @@ use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::IO::*;
 
-use crate::{EventsInnerRead, EventsInnerWrite, PendingWrite, SerialPortStreamBuilder};
+use crate::{EventsInnerRead, EventsInnerWrite, SerialPortStreamBuilder};
 
 mod comm;
 
@@ -46,6 +47,33 @@ impl Drop for Overlapped {
     }
 }
 
+enum WriteState {
+    Idle,
+    InFlight(Box<Overlapped>),
+    Completed(usize),
+}
+
+struct WriteShared {
+    state: Mutex<WriteState>,
+}
+
+unsafe impl Send for WriteShared {}
+unsafe impl Sync for WriteShared {}
+
+impl std::fmt::Debug for WriteShared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let in_flight = matches!(
+            self.state
+                .lock()
+                .map(|s| matches!(*s, WriteState::InFlight(_))),
+            Ok(true)
+        );
+        f.debug_struct("WriteShared")
+            .field("in_flight", &in_flight)
+            .finish()
+    }
+}
+
 /// Sole owner of a raw `HANDLE`; closes it via `CloseHandle` on drop.
 #[derive(Debug)]
 struct OwnedHandle(HANDLE);
@@ -61,10 +89,6 @@ impl Drop for OwnedHandle {
     }
 }
 
-/// Reference-counted RAII wrapper around a raw `HANDLE`. The handle is closed
-/// when the last clone is dropped, so handles created during construction are
-/// released automatically on any early error return (no manual cleanup needed),
-/// and cloning into worker threads keeps the handle alive for as long as needed.
 #[derive(Debug, Clone)]
 struct HandleWrapper(Arc<OwnedHandle>);
 
@@ -92,6 +116,7 @@ pub struct PlatformStream {
     read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     windows_inner: WindowsInner,
+    write_shared: Arc<WriteShared>,
     port: Option<HandleWrapper>,
 }
 
@@ -188,6 +213,9 @@ impl PlatformStream {
                 write_signal_event,
                 write_abort_event,
             },
+            write_shared: Arc::new(WriteShared {
+                state: Mutex::new(WriteState::Idle),
+            }),
             port: Some(port),
         })
     }
@@ -225,6 +253,7 @@ impl PlatformStream {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let write_inner_cloned = self.write_inner.clone();
+        let write_shared = self.write_shared.clone();
         let write_abort_event = self.windows_inner.write_abort_event.clone();
         let write_signal_event = self.windows_inner.write_signal_event.clone();
         let write_handle = self.port_handle();
@@ -233,6 +262,7 @@ impl PlatformStream {
             tx.send(0).unwrap();
             if let Err(err) = Self::write_thread(
                 &write_inner_cloned,
+                &write_shared,
                 write_handle,
                 write_signal_event,
                 write_abort_event,
@@ -251,6 +281,46 @@ impl PlatformStream {
         );
     }
 
+    pub fn poll_write(&mut self, buf: &[u8]) -> Poll<io::Result<usize>> {
+        let mut state = self.write_shared.state.lock().unwrap();
+        match *state {
+            WriteState::Idle => {
+                let handle = self.port_handle().raw();
+                let mut overlapped = match Overlapped::new() {
+                    Ok(o) => Box::new(o),
+                    Err(e) => return Poll::Ready(Err(e)),
+                };
+                let mut bytes_written: u32 = 0;
+                let ok = unsafe {
+                    WriteFile(
+                        handle,
+                        buf.as_ptr() as *const _,
+                        buf.len() as u32,
+                        &mut bytes_written,
+                        overlapped.as_mut_ptr(),
+                    )
+                };
+                if ok != FALSE {
+                    // Completed synchronously; overlapped is dropped here.
+                    return Poll::Ready(Ok(bytes_written as usize));
+                }
+                if unsafe { GetLastError() } == ERROR_IO_PENDING {
+                    *state = WriteState::InFlight(overlapped);
+                    drop(state);
+                    self.signal_write();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Err(io::Error::last_os_error()))
+                }
+            }
+            WriteState::InFlight(_) => Poll::Pending,
+            WriteState::Completed(n) => {
+                *state = WriteState::Idle;
+                Poll::Ready(Ok(n))
+            }
+        }
+    }
+
     pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         let port = self.port_handle();
         blocking::unblock(move || comm::flush_output(port))
@@ -265,9 +335,10 @@ impl PlatformStream {
 
         let mut event_overlapped = Overlapped::new()?;
         let mut read_overlapped = Overlapped::new()?;
+        let mut buffer = Vec::with_capacity(1024);
 
         // Purge any pending data first
-        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
+        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped, &mut buffer)?;
 
         // Enable EV_RXCHAR event
         if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
@@ -304,7 +375,12 @@ impl PlatformStream {
                         {
                             return Err(io::Error::last_os_error());
                         }
-                        Self::purge_pending_data(handle, &read_inner, &mut read_overlapped)?;
+                        Self::purge_pending_data(
+                            handle,
+                            &read_inner,
+                            &mut read_overlapped,
+                            &mut buffer,
+                        )?;
                         continue;
                     }
                     val if val == WAIT_OBJECT_0 + 1 => {
@@ -327,6 +403,7 @@ impl PlatformStream {
         handle: HANDLE,
         read_inner: &Arc<EventsInnerRead>,
         overlapped: &mut Overlapped,
+        buffer: &mut Vec<u8>,
     ) -> io::Result<()> {
         let mut errors: u32 = 0;
         let mut comstat = MaybeUninit::<COMSTAT>::uninit();
@@ -337,15 +414,15 @@ impl PlatformStream {
 
         let len = unsafe { comstat.assume_init() }.cbInQue;
         if len > 0 {
-            let mut buf = vec![0u8; len as usize];
+            buffer.resize(len as usize, 0);
             overlapped.reset()?;
             let mut bytes_read: u32 = 0;
 
             if unsafe {
                 ReadFile(
                     handle,
-                    buf.as_mut_ptr() as *mut _,
-                    buf.len() as u32,
+                    buffer.as_mut_ptr() as *mut _,
+                    buffer.len() as u32,
                     &mut bytes_read,
                     overlapped.as_mut_ptr(),
                 )
@@ -375,8 +452,9 @@ impl PlatformStream {
                 }
             }
 
-            buf.truncate(bytes_read as usize);
-            read_inner.in_buffer.lock().unwrap().extend(buf);
+            buffer.truncate(bytes_read as usize);
+            read_inner.in_buffer.lock().unwrap().extend_from_slice(buffer);
+            buffer.clear();
             read_inner.waker.wake();
         }
         Ok(())
@@ -389,6 +467,7 @@ impl PlatformStream {
 
     fn write_thread(
         write_inner: &Arc<EventsInnerWrite>,
+        write_shared: &Arc<WriteShared>,
         write_handle: HandleWrapper,
         write_signal_event: HandleWrapper,
         write_abort_event: HandleWrapper,
@@ -405,66 +484,49 @@ impl PlatformStream {
                 _ => return Err(io::Error::last_os_error()),
             }
 
-            let buf = {
-                let mut pending = write_inner.pending.lock().unwrap();
-                match &mut *pending {
-                    PendingWrite::Buffer(buf) => std::mem::take(buf),
-                    other => panic!("was waiting for PendingWrite::Buffer but got {other:?}"),
+            let (event, overlapped_ptr) = {
+                let mut state = write_shared.state.lock().unwrap();
+                match &mut *state {
+                    WriteState::InFlight(overlapped) => {
+                        (overlapped.0.hEvent as HANDLE, overlapped.as_mut_ptr())
+                    }
+                    // Spurious wakeup (e.g. a write that completed synchronously); nothing to await.
+                    _ => panic!("was waiting InFlight"),
                 }
             };
 
-            let mut overlapped = Overlapped::new()?;
-            let mut bytes_written: u32 = 0;
-
-            if unsafe {
-                WriteFile(
-                    handle,
-                    buf.as_ptr() as *const _,
-                    buf.len() as u32,
-                    &mut bytes_written,
-                    overlapped.as_mut_ptr(),
+            let wait_objects = [event, write_abort_event.raw()];
+            match unsafe {
+                WaitForMultipleObjects(
+                    wait_objects.len() as u32,
+                    wait_objects.as_ptr(),
+                    0,
+                    INFINITE,
                 )
-            } == FALSE
-            {
-                if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    let wait_objects = [overlapped.0.hEvent as HANDLE, write_abort_event.raw()];
-                    match unsafe {
-                        WaitForMultipleObjects(
-                            wait_objects.len() as u32,
-                            wait_objects.as_ptr(),
-                            0,
-                            INFINITE,
-                        )
-                    } {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(
-                                    handle,
-                                    overlapped.as_mut_ptr(),
-                                    &mut bytes_written,
-                                    1,
-                                )
-                            } == FALSE
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                        }
-                        val if val == WAIT_OBJECT_0 + 1 => {
-                            unsafe { PurgeComm(handle, PURGE_TXABORT | PURGE_TXCLEAR) };
-                            let mut len = 0;
-                            Self::cancel_io(handle, &mut overlapped, &mut len);
-                            return Ok(());
-                        }
-                        _ => return Err(io::Error::last_os_error()),
+            } {
+                WAIT_OBJECT_0 => {
+                    let mut bytes_written: u32 = 0;
+                    let res = unsafe {
+                        GetOverlappedResult(handle, overlapped_ptr, &mut bytes_written, 1)
+                    };
+                    if res == FALSE {
+                        *write_shared.state.lock().unwrap() = WriteState::Idle;
+                        return Err(io::Error::last_os_error());
                     }
-                } else {
-                    return Err(io::Error::last_os_error());
+                    *write_shared.state.lock().unwrap() =
+                        WriteState::Completed(bytes_written as usize);
+                    write_inner.waker.wake();
                 }
+                val if val == WAIT_OBJECT_0 + 1 => {
+                    unsafe { PurgeComm(handle, PURGE_TXABORT | PURGE_TXCLEAR) };
+                    let mut len = 0;
+                    let _ = unsafe { CancelIoEx(handle, overlapped_ptr) };
+                    let _ = unsafe { GetOverlappedResult(handle, overlapped_ptr, &mut len, TRUE) };
+                    *write_shared.state.lock().unwrap() = WriteState::Idle;
+                    return Ok(());
+                }
+                _ => return Err(io::Error::last_os_error()),
             }
-
-            let mut pending = write_inner.pending.lock().unwrap();
-            *pending = PendingWrite::Completed(bytes_written as usize);
-            write_inner.waker.wake();
         }
     }
 }

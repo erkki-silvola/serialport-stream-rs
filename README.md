@@ -64,7 +64,7 @@ For `tokio::io::AsyncRead`, bridge with [`tokio_util::compat`](https://docs.rs/t
 
 ### Writing
 
-[`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) / [`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) are re-exported. The first write starts a background thread.
+[`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) / [`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) are re-exported.
 
 ```rust
 use serialport_stream::{new, AsyncWriteExt, TryStreamExt};

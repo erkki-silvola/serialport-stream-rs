@@ -7,11 +7,7 @@
 //! [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) are defined in this crate.
 //!
 //! The first read poll starts a background thread that appends incoming bytes to an in-memory FIFO
-//! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure. The first write poll starts
-//! a separate background thread. The write is always issued directly from the caller's buffer (no
-//! copy): on Unix the background thread only notifies the task when the port becomes writable again
-//! after `EAGAIN`; on Windows the overlapped `WriteFile` is issued during the poll and the thread
-//! awaits its completion.
+//! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure.
 //!
 //! [`Stream`] / [`TryStreamExt::try_next`] drains the full FIFO per item; [`AsyncRead`] reads
 //! partially and leaves the remainder cached. Use one read style per open port.

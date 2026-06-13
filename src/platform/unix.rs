@@ -153,7 +153,10 @@ impl PlatformStream {
         loop {
             match nix::unistd::write(fd, buf) {
                 Ok(n) => return Poll::Ready(Ok(n)),
-                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EINTR) => {
+                    tracing::debug!("EINTR for write");
+                    continue;
+                }
                 Err(nix::errno::Errno::EAGAIN) => {
                     self.signal_write();
                     return Poll::Pending;
@@ -193,7 +196,10 @@ impl PlatformStream {
                 let did_read = loop {
                     match nix::unistd::read(borrowed_fd, buffer) {
                         Ok(n) => break n,
-                        Err(nix::errno::Errno::EINTR) => continue,
+                        Err(nix::errno::Errno::EINTR) => {
+                            tracing::debug!("EINTR for read");
+                            continue;
+                        }
                         Err(nix::errno::Errno::EAGAIN) => {
                             tracing::info!("EAGAIN for read");
                             break 0;

@@ -3,7 +3,7 @@ name = "serialport-stream"
 version = "0.3.1"
 edition = "2021"
 authors = ["Erkki Silvola"]
-description = "Async Stream and AsyncRead/AsyncWrite for serial ports using platform-specific I/O"
+description = "Async runtime-agnostic Stream and AsyncRead/AsyncWrite for serial ports using platform-specific I/O"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/erkki-silvola/serialport-stream-rs"
 homepage = "https://github.com/erkki-silvola/serialport-stream-rs"
@@ -11,10 +11,14 @@ keywords = ["serialport", "async", "stream", "futures"]
 categories = ["asynchronous", "hardware-support"]
 readme = "README.md"
 
+[features]
+default = []
+tracing = ["dep:tracing"]
+
 [dependencies]
 futures = { version = "0.3", features = ["std"] }
 blocking = "1"
-tracing = "0.1"
+tracing = { version = "0.1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", features = ["poll", "fs", "term", "ioctl"] }
@@ -36,4 +40,5 @@ clap = { version = "3.1.6", features = ["derive"] }
 ctrlc = "3.5.1"
 anyhow = "1.0.100"
 tokio = { version = "1.41", features = ["rt", "rt-multi-thread", "macros", "signal", "sync", "time"] }
+tracing = "0.1"
 tracing-subscriber = "0.3"

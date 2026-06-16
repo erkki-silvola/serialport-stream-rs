@@ -374,7 +374,7 @@ pub fn flush_output(fd: RawFd) -> io::Result<()> {
         match termios::tcdrain(borrowed) {
             Ok(()) => return Ok(()),
             Err(Errno::EINTR) if attempt < MAX_ATTEMPTS => {
-                tracing::info!(attempt, "EINTR for flush");
+                trace_info!(attempt, "EINTR for flush");
                 continue;
             }
             Err(e) => return Err(io::Error::from(e)),

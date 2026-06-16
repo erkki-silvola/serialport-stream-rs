@@ -190,7 +190,7 @@ impl PlatformStream {
                 let did_read = match nix::unistd::read(borrowed_fd, buffer) {
                     Ok(n) => n,
                     Err(nix::errno::Errno::EAGAIN) => {
-                        tracing::info!("EAGAIN for read");
+                        trace_info!("EAGAIN for read");
                         0
                     }
                     Err(e) => return Err(std::io::Error::from(e)),

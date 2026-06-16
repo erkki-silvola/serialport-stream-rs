@@ -2,11 +2,19 @@
 
 Async serial port I/O as [`futures::Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html), [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html), and [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html). Uses POSIX termios on Unix and Win32 COMM APIs on Windows.
 
+**Async runtime agnostic** — implements [`futures`](https://docs.rs/futures) traits only; no Tokio/async-std dependency. Works with any executor that polls those futures (Tokio, async-std, `futures_lite::future::block_on`, etc.).
+
 ## Installation
 
 ```toml
 [dependencies]
 serialport-stream = "0.3"
+```
+
+Optional diagnostic logs via the [`tracing`](https://docs.rs/tracing) crate:
+
+```toml
+serialport-stream = { version = "0.3", features = ["tracing"] }
 ```
 
 Examples below also use `futures-lite` (blocking) or `tokio`.
@@ -58,7 +66,7 @@ A background thread fills one in-memory FIFO. There is no backpressure; the buff
 
 Use one read style per port. Mixing `Stream` and `AsyncRead` can split messages across calls.
 
-[`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) is re-exported (`read`, `read_to_end`, etc.). Example: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200`.
+[`AsyncReadExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncReadExt.html) is re-exported (`read`, `read_to_end`, etc.). Example: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200`. Add `--features tracing` with `--trace` for diagnostic logs.
 
 For `tokio::io::AsyncRead`, bridge with [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) (`tokio-util` feature `compat`).
 
@@ -84,7 +92,7 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Example: `cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200`.
+Example: `cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200`. Add `--features tracing` with `--trace` for diagnostic logs.
 
 For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) as above.
 

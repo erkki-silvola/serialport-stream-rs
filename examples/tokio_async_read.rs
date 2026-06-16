@@ -3,7 +3,7 @@
 //! Run:
 //! ```text
 //! cargo run --example tokio_async_read -- /dev/ttyUSB0 115200
-//! cargo run --example tokio_async_read -- /dev/ttyUSB0 115200 --trace
+//! cargo run --example tokio_async_read --features tracing -- /dev/ttyUSB0 115200 --trace
 //! ```
 
 use anyhow::Result;

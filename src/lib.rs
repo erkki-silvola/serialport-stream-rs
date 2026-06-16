@@ -1,10 +1,17 @@
 //! Async serial port I/O as [`Stream`], [`AsyncRead`], and [`AsyncWrite`].
 //!
+//! Async runtime agnostic: this crate implements [`futures`] traits only and does not depend on
+//! Tokio, async-std, or any other executor. Use it with any runtime that polls those futures
+//! (Tokio, async-std, [`futures_lite::future::block_on`], etc.).
+//!
 //! Configure and open ports with [`new`] → [`SerialPortStreamBuilder`] → [`.open()`](SerialPortStreamBuilder::open).
 //! Line settings, DTR, and buffer clearing are applied at open time.
 //!
 //! POSIX `termios` on Unix; Win32 COMM APIs on Windows. Configuration types ([`DataBits`],
 //! [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) are defined in this crate.
+//!
+//! Optional [`tracing`] logs (EAGAIN/EINTR retries, receive-buffer diagnostics) are enabled with
+//! the `tracing` Cargo feature.
 //!
 //! The first read poll starts a background thread that appends incoming bytes to an in-memory FIFO
 //! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure.
@@ -32,6 +39,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+
+macro_rules! trace_info {
+    ($($tt:tt)*) => {
+        #[cfg(feature = "tracing")]
+        tracing::info!($($tt)*);
+    };
+}
 
 mod platform;
 mod types;
@@ -375,7 +389,7 @@ impl AsyncRead for SerialPortStream {
                 buffer.drain(..n);
                 let cached_bytes = buffer.len();
                 if cached_bytes > 0 {
-                    tracing::info!(
+                    trace_info!(
                         read_bytes = n,
                         cached_bytes,
                         "serialport-stream receive buffer after AsyncRead read"

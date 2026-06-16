@@ -369,11 +369,13 @@ pub fn clear(fd: RawFd, buffer: ClearBuffer) -> io::Result<()> {
 /// Waits until all written output has been transmitted (`tcdrain`).
 pub fn flush_output(fd: RawFd) -> io::Result<()> {
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    loop {
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
         match termios::tcdrain(borrowed) {
             Ok(()) => return Ok(()),
-            Err(Errno::EINTR) => continue,
+            Err(Errno::EINTR) if attempt < MAX_ATTEMPTS => continue,
             Err(e) => return Err(io::Error::from(e)),
         }
     }
+    unreachable!()
 }

@@ -494,7 +494,6 @@ impl PlatformStream {
                     WriteState::InFlight(overlapped) => {
                         (overlapped.0.hEvent as HANDLE, overlapped.as_mut_ptr())
                     }
-                    // Spurious wakeup (e.g. a write that completed synchronously); nothing to await.
                     _ => panic!("was waiting InFlight"),
                 }
             };
@@ -529,7 +528,10 @@ impl PlatformStream {
                     *write_shared.state.lock().unwrap() = WriteState::Idle;
                     return Ok(());
                 }
-                _ => return Err(io::Error::last_os_error()),
+                _ => {
+                    *write_shared.state.lock().unwrap() = WriteState::Idle;
+                    return Err(io::Error::last_os_error());
+                }
             }
         }
     }

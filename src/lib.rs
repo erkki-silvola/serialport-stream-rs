@@ -180,8 +180,6 @@ impl SerialPortStreamBuilder {
 
     /// Sets the DTR (Data Terminal Ready) signal state applied when opening the port.
     ///
-    /// `true` asserts DTR, `false` clears it. The line is always driven on open.
-    ///
     /// Default: `false`
     #[must_use]
     pub fn dtr_on_open(mut self, state: bool) -> Self {

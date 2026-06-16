@@ -93,7 +93,7 @@ For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-ut
 Open with [`new(path, baud_rate)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), then chain options and call `.open()`:
 
 - `.data_bits`, `.parity`, `.stop_bits`, `.flow_control` — default is 8N1, no flow control
-- `.dtr_on_open(bool)` — drive DTR on open: `true` asserts, `false` clears (default: `false`)
+- `.dtr_on_open(bool)` — drive DTR on open
 - `.clear(ClearBuffer::Input | Output | All)` — purge driver buffers at open
 
 Types `DataBits`, `Parity`, `StopBits`, `FlowControl`, and `ClearBuffer` are exported from `serialport_stream`.

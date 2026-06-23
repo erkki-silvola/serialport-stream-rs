@@ -182,6 +182,12 @@ pub fn configure_port(handle: HANDLE, builder: &SerialPortStreamBuilder) -> io::
     Ok(())
 }
 
+pub fn set_baud_rate(handle: HANDLE, baud_rate: u32) -> io::Result<()> {
+    let mut dcb = get_dcb(handle)?;
+    dcb.BaudRate = baud_rate;
+    set_dcb(handle, dcb)
+}
+
 fn set_data_terminal_ready(handle: HANDLE, state: bool) -> io::Result<()> {
     let func = if state { SETDTR } else { CLRDTR };
     if unsafe { EscapeCommFunction(handle, func) } != 0 {

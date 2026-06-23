@@ -321,6 +321,10 @@ impl PlatformStream {
         }
     }
 
+    pub fn set_baud_rate(&self, baud_rate: u32) -> io::Result<()> {
+        comm::set_baud_rate(self.port_handle().raw(), baud_rate)
+    }
+
     pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         let port = self.port_handle();
         blocking::unblock(move || comm::flush_output(port))

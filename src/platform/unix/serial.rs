@@ -79,8 +79,14 @@ fn apply_line_settings(fd: RawFd, builder: &SerialPortStreamBuilder) -> io::Resu
     set_flow_control(&mut termios, builder.flow_control);
     set_data_bits(&mut termios, builder.data_bits);
     set_stop_bits(&mut termios, builder.stop_bits);
-    set_baud_rate(&mut termios, builder.baud_rate)?;
+    set_baud_rate_in_termios(&mut termios, builder.baud_rate)?;
     set_termios(fd, &termios, builder.baud_rate)
+}
+
+pub fn set_baud_rate(fd: RawFd, baud_rate: u32) -> io::Result<()> {
+    let mut termios = get_termios(fd)?;
+    set_baud_rate_in_termios(&mut termios, baud_rate)?;
+    set_termios(fd, &termios, baud_rate)
 }
 
 #[cfg(any(
@@ -243,7 +249,7 @@ fn set_stop_bits(termios: &mut Termios, stop_bits: StopBits) {
     }
 }
 
-fn set_baud_rate(termios: &mut Termios, baud_rate: u32) -> io::Result<()> {
+fn set_baud_rate_in_termios(termios: &mut Termios, baud_rate: u32) -> io::Result<()> {
     #[cfg(any(
         target_os = "android",
         all(

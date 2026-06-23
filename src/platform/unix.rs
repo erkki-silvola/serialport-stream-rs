@@ -96,6 +96,10 @@ impl PlatformStream {
         })
     }
 
+    pub fn set_baud_rate(&self, baud_rate: u32) -> std::io::Result<()> {
+        serial::set_baud_rate(self.write_fd.as_raw_fd(), baud_rate)
+    }
+
     pub fn flush_tx_unblocked(&self) -> blocking::Task<std::io::Result<()>> {
         let fd = self.flush_fd.as_raw_fd();
         blocking::unblock(move || serial::flush_output(fd))

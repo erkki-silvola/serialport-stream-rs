@@ -271,8 +271,6 @@ pub fn new<'a>(
 /// - [`Stream`] / [`AsyncRead`]: shared in-memory receive FIFO (background read thread).
 /// - [`AsyncWrite`]: dedicated background write thread.
 ///
-/// Configure the port only via [`SerialPortStreamBuilder`] before [`SerialPortStreamBuilder::open`].
-///
 /// # Example
 ///
 /// ```no_run
@@ -361,6 +359,13 @@ impl SerialPortStream {
                 Poll::Pending
             }
         }
+    }
+
+    /// Sets the baud rate (bits per second) on an already-open port.
+    ///
+    /// Other line settings (data bits, parity, stop bits, flow control) remain unchanged.
+    pub fn set_baudrate(&mut self, baud_rate: u32) -> std::io::Result<()> {
+        self.platform.set_baud_rate(baud_rate)
     }
 }
 

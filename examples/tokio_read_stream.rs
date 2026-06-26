@@ -39,12 +39,8 @@ async fn main() -> Result<()> {
             // Handle incoming data
             result = stream.try_next() => {
                 match result {
-                    Ok(Some(data)) => {
-                        println!("Received {} bytes", data.len());
-                    }
-                    Ok(None) => {
-                        println!("Stream ended");
-                        break;
+                    Ok(data) => {
+                        println!("Received {} bytes", data.unwrap().len());
                     }
                     Err(e) => {
                         eprintln!("poll next error: {}", e);

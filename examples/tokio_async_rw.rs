@@ -69,9 +69,9 @@ async fn main() -> Result<()> {
                 stream.write_all(WRITE_PAYLOAD).await?;
                 stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
-                if let Some(out) = stream.try_next().await? {
-                    println!("received {} bytes: {:02X?}", out.len(), out);
-                }
+                let out = stream.try_next().await?.unwrap();
+                println!("received {} bytes: {:02X?}", out.len(), out);
+
                 Ok::<(), anyhow::Error>(())
             } => {
                 if let Err(e) = res {

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+##### Added
+
+* `SerialPortStream::set_baudrate` to change the baud rate on an already-open port; other line settings remain unchanged.
+
+##### Changed
+
+* `tracing` is now an optional dependency; enable the `tracing` feature to compile in diagnostic logs.
+
 ## [0.3.1] - 2026-06-16
 
 ##### Changed

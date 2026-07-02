@@ -84,9 +84,19 @@ fn apply_line_settings(fd: RawFd, builder: &SerialPortStreamBuilder) -> io::Resu
 }
 
 pub fn set_baud_rate(fd: RawFd, baud_rate: u32) -> io::Result<()> {
-    let mut termios = get_termios(fd)?;
-    set_baud_rate_in_termios(&mut termios, baud_rate)?;
-    set_termios(fd, &termios, baud_rate)
+    if cfg!(any(target_os = "ios", target_os = "macos")) {
+        // on macos on-flight TCSANOW fails, so only set speed
+        if baud_rate > 0 {
+            let speed = baud_rate as libc::speed_t;
+            let res = unsafe { libc::ioctl(fd, IOSSIOSPEED as IoctlRequest, &speed) };
+            Errno::result(res)?;
+        }
+        Ok(())
+    } else {
+        let mut termios = get_termios(fd)?;
+        set_baud_rate_in_termios(&mut termios, baud_rate)?;
+        set_termios(fd, &termios, baud_rate)
+    }
 }
 
 #[cfg(any(

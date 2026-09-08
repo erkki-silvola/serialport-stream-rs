@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::{mem::MaybeUninit, ptr};
 use windows_sys::Win32::Devices::Communication::*;
 use windows_sys::Win32::Foundation::*;
@@ -281,7 +281,7 @@ impl PlatformStream {
         );
     }
 
-    pub fn poll_write(&mut self, buf: &[u8]) -> Poll<io::Result<usize>> {
+    pub fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let mut state = self.write_shared.state.lock().unwrap();
         match *state {
             WriteState::Idle => {

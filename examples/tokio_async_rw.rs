@@ -1,9 +1,9 @@
-//! Async read/write.
+//! Async read/write (`AsyncRead` + `Stream` for receive).
 //!
 //! Run:
 //! ```text
-//! cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200
-//! cargo run --example tokio_async_rw --features tracing -- /dev/ttyUSB0 115200 --trace
+//! cargo run --example tokio_async_rw --features stream -- /dev/ttyUSB0 115200
+//! cargo run --example tokio_async_rw --features stream,tracing -- /dev/ttyUSB0 115200 --trace
 //! ```
 
 use anyhow::Result;

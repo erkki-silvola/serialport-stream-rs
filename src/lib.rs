@@ -9,10 +9,9 @@
 //!
 //! ## Features
 //!
-//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`try_poll_next`]. On Unix this
-//!   starts the same poll-based background read thread as earlier releases to fill an in-memory
-//!   FIFO. On Windows, [`AsyncRead`] already uses that FIFO path; `stream` additionally exposes
-//!   the [`Stream`] API on top of it.
+//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`try_poll_next`]. Starts a
+//!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
+//!   thread on Windows). [`AsyncRead`] and [`AsyncWrite`] stay on the direct path on both platforms.
 //! - **`tracing`** (optional): diagnostic logs for EAGAIN retries and receive-buffer diagnostics.
 //!
 //! ## Read paths
@@ -20,14 +19,14 @@
 //! | Platform | [`AsyncRead`] | [`Stream`] / [`try_poll_next`] (`stream` feature) |
 //! | --- | --- | --- |
 //! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Poll-based background thread → FIFO |
-//! | Windows | Background read thread → FIFO | Same FIFO; `try_next` drains all buffered bytes |
+//! | Windows | Overlapped `ReadFile` + [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) | Background read thread → FIFO |
 //!
-//! On Unix, do not mix [`AsyncRead`] and [`Stream`] on one open port when `stream` is enabled.
+//! When `stream` is enabled, do not mix [`AsyncRead`] and [`Stream`] on one open port (Unix and Windows).
 //!
 //! ## Write path
 //!
 //! On Unix, [`AsyncWrite`] uses [`async-io`](https://docs.rs/async-io). On Windows, overlapped
-//! `WriteFile` with a background completion thread (unchanged from earlier releases).
+//! `WriteFile` with async-io [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) on the completion event.
 //!
 //! [`AsyncReadExt`] and [`AsyncWriteExt`] are re-exported from `futures`.
 //!
@@ -78,14 +77,14 @@ pub use futures::io::{AsyncWrite, AsyncWriteExt};
 pub use futures::stream::{Stream, TryStreamExt};
 
 #[derive(Debug)]
-#[cfg(any(windows, feature = "stream"))]
+#[cfg(feature = "stream")]
 pub(crate) struct EventsInnerRead {
     pub(crate) in_buffer: Mutex<Vec<u8>>,
     pub(crate) stream_error: Mutex<Option<std::io::Error>>,
     pub(crate) waker: AtomicWaker,
 }
 
-#[cfg(any(windows, feature = "stream"))]
+#[cfg(feature = "stream")]
 impl EventsInnerRead {
     pub(crate) fn new() -> Self {
         Self {
@@ -228,16 +227,16 @@ impl SerialPortStreamBuilder {
     /// [`clear`](Self::clear) before async I/O begins.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
         let write_inner = Arc::new(EventsInnerWrite::new());
-        #[cfg(any(windows, feature = "stream"))]
+        #[cfg(feature = "stream")]
         let read_inner = Arc::new(EventsInnerRead::new());
         Ok(SerialPortStream {
             platform: PlatformStream::new(
                 self,
-                #[cfg(any(windows, feature = "stream"))]
+                #[cfg(feature = "stream")]
                 read_inner.clone(),
                 write_inner.clone(),
             )?,
-            #[cfg(any(windows, feature = "stream"))]
+            #[cfg(feature = "stream")]
             read_inner,
             write_inner,
             flush_task: None,
@@ -290,15 +289,15 @@ pub fn new<'a>(
 /// # Read behavior
 ///
 /// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
-/// - **Windows:** [`AsyncRead`] reads from a background-thread FIFO (same as before).
+/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with async-io [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) on the completion event.
 ///
-/// Enable the `stream` feature for [`Stream`] / [`try_poll_next`]. On Unix that uses a separate
-/// receive pump and FIFO; do not mix with [`AsyncRead`] on the same port. On Windows, [`Stream`]
-/// shares the FIFO used by [`AsyncRead`].
+/// Enable the `stream` feature for [`Stream`] / [`try_poll_next`]. That starts a background receive
+/// pump and FIFO on both platforms. Do not mix [`AsyncRead`] and [`Stream`] on one port when `stream`
+/// is enabled. [`Stream`] drains the FIFO; [`AsyncRead`] stays on the direct overlapped/async-io path.
 ///
 /// # Write behavior
 ///
-/// Unix uses async-io; Windows uses overlapped `WriteFile` with a background completion thread.
+/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + `Waitable` on Windows).
 ///
 /// # Example
 ///
@@ -317,7 +316,7 @@ pub fn new<'a>(
 /// ```
 pub struct SerialPortStream {
     platform: PlatformStream,
-    #[cfg(any(windows, feature = "stream"))]
+    #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
     write_inner: Arc<EventsInnerWrite>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
@@ -336,7 +335,7 @@ impl std::fmt::Debug for SerialPortStream {
 }
 
 impl SerialPortStream {
-    #[cfg(any(windows, feature = "stream"))]
+    #[cfg(feature = "stream")]
     fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.read_inner.waker.register(cx.waker());
 
@@ -352,45 +351,11 @@ impl SerialPortStream {
         Poll::Ready(Ok(()))
     }
 
-    #[cfg(windows)]
-    fn poll_read_from_fifo(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        match self.poll_receiver_ready(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
-                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
-                if buffer.is_empty() {
-                    return Poll::Pending;
-                }
-                let n = buf.len().min(buffer.len());
-                buf[..n].copy_from_slice(&buffer[..n]);
-                buffer.drain(..n);
-                let cached_bytes = buffer.len();
-                if cached_bytes > 0 {
-                    trace_info!(
-                        read_bytes = n,
-                        cached_bytes,
-                        "serialport-stream receive buffer after AsyncRead read"
-                    );
-                }
-                Poll::Ready(Ok(n))
-            }
-        }
-    }
-
     fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
         self.write_inner.waker.register(cx.waker());
 
         if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
             return Err(clone_io_error(err));
-        }
-
-        if !self.platform.is_write_thread_started() {
-            self.platform.start_write_thread();
         }
 
         Ok(())
@@ -402,8 +367,7 @@ impl SerialPortStream {
     /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered in the
     /// receive FIFO, or `Poll::Pending` if the pump thread has not yet delivered data.
     ///
-    /// Requires the `stream` Cargo feature. On Unix, use either this or [`AsyncRead`] per port,
-    /// not both.
+    /// Requires the `stream` Cargo feature.
     pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -441,14 +405,7 @@ impl AsyncRead for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        #[cfg(unix)]
-        {
-            this.platform.poll_read(cx, buf)
-        }
-        #[cfg(windows)]
-        {
-            this.poll_read_from_fifo(cx, buf)
-        }
+        this.platform.poll_read(cx, buf)
     }
 }
 

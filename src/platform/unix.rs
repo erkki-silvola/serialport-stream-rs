@@ -194,17 +194,7 @@ impl PlatformStream {
         rx.recv().expect("Failed to start thread");
     }
 
-    pub fn is_write_thread_started(&self) -> bool {
-        true
-    }
-
-    pub fn start_write_thread(&mut self) {}
-
-    pub fn poll_write(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
+    pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.write_async).poll_write(cx, buf)
     }
 

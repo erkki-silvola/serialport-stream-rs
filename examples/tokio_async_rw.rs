@@ -1,14 +1,14 @@
-//! Async read/write (`AsyncRead` + `Stream` for receive).
+//! Async read/write (`AsyncRead` + `AsyncWrite`).
 //!
 //! Run:
 //! ```text
-//! cargo run --example tokio_async_rw --features stream -- /dev/ttyUSB0 115200
-//! cargo run --example tokio_async_rw --features stream,tracing -- /dev/ttyUSB0 115200 --trace
+//! cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200
+//! cargo run --example tokio_async_rw --features tracing -- /dev/ttyUSB0 115200 --trace
 //! ```
 
 use anyhow::Result;
 use clap::{Arg, Command};
-use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
+use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
 use tokio::signal::ctrl_c;
 
 const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let ctrl_c = ctrl_c();
     tokio::pin!(ctrl_c);
 
-    println!("Read / write with Async + Stream");
+    println!("Read / write with AsyncRead + AsyncWrite");
     println!("--------------------------------------------------------------------------------");
 
     loop {
@@ -69,8 +69,9 @@ async fn main() -> Result<()> {
                 stream.write_all(WRITE_PAYLOAD).await?;
                 stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
-                let out = stream.try_next().await?.unwrap();
-                println!("received {} bytes: {:02X?}", out.len(), out);
+                let mut buf = [0u8; 256];
+                let len = stream.read(&mut buf).await?;
+                println!("received {} ", len);
 
                 Ok::<(), anyhow::Error>(())
             } => {

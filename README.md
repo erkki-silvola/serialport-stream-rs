@@ -14,7 +14,7 @@ serialport-stream = "0.3"
 Optional features:
 
 ```toml
-# Stream / try_next / receive FIFO pump (Unix); Stream API on Windows
+# Stream / try_next — background receive FIFO pump (Unix and Windows)
 serialport-stream = { version = "0.3", features = ["stream"] }
 
 # Diagnostic logs (EAGAIN retries, receive-buffer diagnostics)
@@ -28,19 +28,24 @@ Examples below also use `futures-lite` (blocking) or `tokio`.
 | Platform | `AsyncRead` | `Stream` / `try_next` (`stream` feature) |
 | --- | --- | --- |
 | **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port | Poll-based background read thread → FIFO |
-| **Windows** | Background read thread → FIFO | Same FIFO; `try_next` drains the full buffer per item |
+| **Windows** | Overlapped `ReadFile` + async-io `Waitable` | Background read thread → FIFO |
 
-On **Unix** with `stream` enabled, use either `AsyncRead` or `Stream` per open port — not both.
-
-On **Windows**, `AsyncRead` and `Stream` (with `stream`) share the same FIFO. `AsyncRead` returns up to your buffer size and leaves the remainder cached; `try_next` drains everything at once.
+With `stream` enabled, use either `AsyncRead` or `Stream` per open port — not both (Unix and Windows).
 
 There is no backpressure on FIFO paths; the buffer can grow without bound.
+
+## Write behavior
+
+| Platform | `AsyncWrite` |
+| --- | --- |
+| **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port |
+| **Windows** | Overlapped `WriteFile` + async-io `Waitable` |
 
 ## Usage
 
 ### AsyncRead (default)
 
-Works without extra features. On Unix this is the preferred path.
+Works without extra features. Preferred path on both platforms.
 
 ```rust
 use serialport_stream::{new, AsyncReadExt};
@@ -105,7 +110,7 @@ Example: `cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB
 
 ### Writing
 
-[`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) is re-exported. On Unix, writes use async-io; on Windows, overlapped `WriteFile` with a background completion thread.
+[`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) is re-exported. On Unix, writes use async-io; on Windows, overlapped `WriteFile` with async-io `Waitable`.
 
 ```rust
 use serialport_stream::{new, AsyncWriteExt};
@@ -119,7 +124,7 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Read + write example (uses `Stream` for the read side): `cargo run --example tokio_async_rw --features stream -- /dev/ttyUSB0 115200`
+Read + write example (`AsyncRead` + `AsyncWrite`, no extra features): `cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200`
 
 For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) as above.
 

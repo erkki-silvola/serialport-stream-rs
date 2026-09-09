@@ -1,12 +1,10 @@
 use std::io;
 #[cfg(feature = "stream")]
 use std::mem::MaybeUninit;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use async_io::os::windows::Waitable;
 use windows_sys::Win32::Devices::Communication::*;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::*;
@@ -18,6 +16,9 @@ use crate::EventsInnerRead;
 use crate::{EventsInnerWrite, SerialPortStreamBuilder};
 
 mod comm;
+mod reactor;
+
+use reactor::{new_overlapped, poll_overlapped_result, OverlappedEvent};
 
 #[cfg(feature = "stream")]
 /// OVERLAPPED wrapper for the `stream` feature background thread.
@@ -60,7 +61,7 @@ enum WriteState {
     Idle,
     InFlight {
         overlapped: Box<OVERLAPPED>,
-        waitable: Waitable<OwnedHandle>,
+        event: OverlappedEvent,
     },
 }
 
@@ -90,7 +91,7 @@ enum ReadState {
     Idle,
     InFlight {
         overlapped: Box<OVERLAPPED>,
-        waitable: Waitable<OwnedHandle>,
+        event: OverlappedEvent,
     },
 }
 
@@ -169,16 +170,10 @@ impl PlatformStream {
         self.port.as_ref().expect("port not available").clone()
     }
 
-    fn new_overlapped_io() -> io::Result<(Waitable<OwnedHandle>, Box<OVERLAPPED>)> {
-        let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
-        if event.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let owned = unsafe { OwnedHandle::from_raw_handle(event as RawHandle) };
-        let waitable = Waitable::new(owned)?;
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.hEvent = waitable.as_raw_handle() as HANDLE;
-        Ok((waitable, Box::new(overlapped)))
+    fn new_overlapped_io() -> io::Result<(OverlappedEvent, Box<OVERLAPPED>)> {
+        let event = OverlappedEvent::new()?;
+        let overlapped = new_overlapped(&event);
+        Ok((event, overlapped))
     }
 
     pub fn new(
@@ -276,13 +271,13 @@ impl PlatformStream {
 
     #[cfg(not(feature = "stream"))]
     pub fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        let handle = self.read_port.raw();
         println!("poll_read");
+        let handle = self.read_port.raw();
         let mut state = self.read_shared.state.lock().unwrap();
         loop {
             match &mut *state {
                 ReadState::Idle => {
-                    let (waitable, mut overlapped) = match Self::new_overlapped_io() {
+                    let (event, mut overlapped) = match Self::new_overlapped_io() {
                         Ok(v) => v,
                         Err(e) => return Poll::Ready(Err(e)),
                     };
@@ -311,35 +306,31 @@ impl PlatformStream {
                     }
                     *state = ReadState::InFlight {
                         overlapped,
-                        waitable,
+                        event,
                     };
                 }
-                ReadState::InFlight {
-                    waitable,
-                    overlapped,
-                } => {
-                    return match waitable.poll_ready(cx) {
+                ReadState::InFlight { event, overlapped } => {
+                    return match event.poll_ready(cx) {
                         Poll::Pending => Poll::Pending,
                         Poll::Ready(Err(e)) => {
                             *state = ReadState::Idle;
                             Poll::Ready(Err(e))
                         }
-                        Poll::Ready(Ok(())) => {
-                            let mut bytes_read: u32 = 0;
-                            let res = unsafe {
-                                GetOverlappedResult(handle, overlapped.as_mut(), &mut bytes_read, FALSE)
-                            };
-                            if res == FALSE {
-                                let err = io::Error::last_os_error();
-                                if err.raw_os_error() == Some(ERROR_IO_INCOMPLETE as i32) {
-                                    return Poll::Pending;
-                                }
+                        Poll::Ready(Ok(())) => match poll_overlapped_result(
+                            handle,
+                            overlapped.as_mut(),
+                            event,
+                        ) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(err)) => {
                                 *state = ReadState::Idle;
                                 return Poll::Ready(Err(err));
                             }
-                            *state = ReadState::Idle;
-                            Poll::Ready(Ok(bytes_read as usize))
-                        }
+                            Poll::Ready(Ok(bytes_read)) => {
+                                *state = ReadState::Idle;
+                                return Poll::Ready(Ok(bytes_read as usize));
+                            }
+                        },
                     };
                 }
             }
@@ -373,13 +364,13 @@ impl PlatformStream {
     }
 
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        let handle = self.write_port.raw();
         println!("poll_write");
+        let handle = self.write_port.raw();
         let mut state = self.write_shared.state.lock().unwrap();
         loop {
             match &mut *state {
                 WriteState::Idle => {
-                    let (waitable, mut overlapped) = match Self::new_overlapped_io() {
+                    let (event, mut overlapped) = match Self::new_overlapped_io() {
                         Ok(v) => v,
                         Err(e) => return Poll::Ready(Err(e)),
                     };
@@ -408,35 +399,31 @@ impl PlatformStream {
                     }
                     *state = WriteState::InFlight {
                         overlapped,
-                        waitable,
+                        event,
                     };
                 }
-                WriteState::InFlight {
-                    waitable,
-                    overlapped,
-                } => {
-                    return match waitable.poll_ready(cx) {
+                WriteState::InFlight { event, overlapped } => {
+                    return match event.poll_ready(cx) {
                         Poll::Pending => Poll::Pending,
                         Poll::Ready(Err(e)) => {
                             *state = WriteState::Idle;
                             Poll::Ready(Err(e))
                         }
-                        Poll::Ready(Ok(())) => {
-                            let mut bytes_written: u32 = 0;
-                            let res = unsafe {
-                                GetOverlappedResult(handle, overlapped.as_mut(), &mut bytes_written, FALSE)
-                            };
-                            if res == FALSE {
-                                let err = io::Error::last_os_error();
-                                if err.raw_os_error() == Some(ERROR_IO_INCOMPLETE as i32) {
-                                    return Poll::Pending;
-                                }
+                        Poll::Ready(Ok(())) => match poll_overlapped_result(
+                            handle,
+                            overlapped.as_mut(),
+                            event,
+                        ) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(err)) => {
                                 *state = WriteState::Idle;
                                 return Poll::Ready(Err(err));
                             }
-                            *state = WriteState::Idle;
-                            Poll::Ready(Ok(bytes_written as usize))
-                        }
+                            Poll::Ready(Ok(bytes_written)) => {
+                                *state = WriteState::Idle;
+                                return Poll::Ready(Ok(bytes_written as usize));
+                            }
+                        },
                     };
                 }
             }

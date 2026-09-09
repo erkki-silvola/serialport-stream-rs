@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 let mut buf = [0u8; 256];
                 let len = stream.read(&mut buf).await?;
-                println!("received {} ", len);
+                println!("received {len} bytes: {:02X?}", &buf[..len]);
 
                 Ok::<(), anyhow::Error>(())
             } => {

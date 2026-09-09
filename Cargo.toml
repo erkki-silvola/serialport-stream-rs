@@ -26,7 +26,6 @@ async-io = "2"
 nix = { version = "0.30.1", features = ["fs", "term", "ioctl", "poll"] }
 
 [target.'cfg(windows)'.dependencies]
-async-io = "2"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

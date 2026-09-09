@@ -19,7 +19,7 @@
 //! | Platform | [`AsyncRead`] (no `stream`) | [`AsyncRead`] + [`Stream`] (`stream` feature) |
 //! | --- | --- | --- |
 //! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Shared poll-based background thread → FIFO |
-//! | Windows | Overlapped `ReadFile` + [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) | Shared background read thread → FIFO |
+//! | Windows | Overlapped `ReadFile` + thread-pool reactor | Shared background read thread → FIFO |
 //!
 //! When `stream` is enabled, [`AsyncRead`] and [`Stream`] share the same background receive FIFO
 //! (Unix and Windows).
@@ -27,7 +27,7 @@
 //! ## Write path
 //!
 //! On Unix, [`AsyncWrite`] uses [`async-io`](https://docs.rs/async-io). On Windows, overlapped
-//! `WriteFile` with async-io [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) on the completion event.
+//! `WriteFile` with a dedicated thread-pool completion reactor.
 //!
 //! [`AsyncReadExt`] and [`AsyncWriteExt`] are re-exported from `futures`.
 //!
@@ -283,7 +283,7 @@ pub fn new<'a>(
 /// # Read behavior
 ///
 /// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
-/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with async-io [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) on the completion event.
+/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a thread-pool completion reactor.
 ///
 /// Enable the `stream` feature for [`Stream`] / [`try_poll_next`]. That starts a background receive
 /// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
@@ -291,7 +291,7 @@ pub fn new<'a>(
 ///
 /// # Write behavior
 ///
-/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + `Waitable` on Windows).
+/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + thread-pool reactor on Windows).
 ///
 /// # Example
 ///

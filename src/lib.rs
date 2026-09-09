@@ -11,17 +11,18 @@
 //!
 //! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`try_poll_next`]. Starts a
 //!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
-//!   thread on Windows). [`AsyncRead`] and [`AsyncWrite`] stay on the direct path on both platforms.
+//!   thread on Windows). With `stream` enabled, [`AsyncRead`] and [`Stream`] share that FIFO.
 //! - **`tracing`** (optional): diagnostic logs for EAGAIN retries and receive-buffer diagnostics.
 //!
 //! ## Read paths
 //!
-//! | Platform | [`AsyncRead`] | [`Stream`] / [`try_poll_next`] (`stream` feature) |
+//! | Platform | [`AsyncRead`] (no `stream`) | [`AsyncRead`] + [`Stream`] (`stream` feature) |
 //! | --- | --- | --- |
-//! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Poll-based background thread → FIFO |
-//! | Windows | Overlapped `ReadFile` + [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) | Background read thread → FIFO |
+//! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Shared poll-based background thread → FIFO |
+//! | Windows | Overlapped `ReadFile` + [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) | Shared background read thread → FIFO |
 //!
-//! When `stream` is enabled, do not mix [`AsyncRead`] and [`Stream`] on one open port (Unix and Windows).
+//! When `stream` is enabled, [`AsyncRead`] and [`Stream`] share the same background receive FIFO
+//! (Unix and Windows).
 //!
 //! ## Write path
 //!
@@ -47,13 +48,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-
-macro_rules! trace_info {
-    ($($tt:tt)*) => {
-        #[cfg(feature = "tracing")]
-        tracing::info!($($tt)*);
-    };
-}
 
 mod platform;
 mod types;
@@ -292,8 +286,8 @@ pub fn new<'a>(
 /// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with async-io [`Waitable`](https://docs.rs/async-io/latest/async_io/os/windows/struct.Waitable.html) on the completion event.
 ///
 /// Enable the `stream` feature for [`Stream`] / [`try_poll_next`]. That starts a background receive
-/// pump and FIFO on both platforms. Do not mix [`AsyncRead`] and [`Stream`] on one port when `stream`
-/// is enabled. [`Stream`] drains the FIFO; [`AsyncRead`] stays on the direct overlapped/async-io path.
+/// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
+/// from the same FIFO.
 ///
 /// # Write behavior
 ///
@@ -362,6 +356,24 @@ impl SerialPortStream {
     }
 
     #[cfg(feature = "stream")]
+    fn poll_read_fifo(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        match self.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
+                if buffer.is_empty() {
+                    return Poll::Pending;
+                }
+                let n = buffer.len().min(buf.len());
+                buf[..n].copy_from_slice(&buffer[..n]);
+                buffer.drain(..n);
+                Poll::Ready(Ok(n))
+            }
+        }
+    }
+
+    #[cfg(feature = "stream")]
     /// Polls for the next received chunk, same as [`Stream::poll_next`].
     ///
     /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered in the
@@ -405,7 +417,14 @@ impl AsyncRead for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        this.platform.poll_read(cx, buf)
+        #[cfg(feature = "stream")]
+        {
+            return this.poll_read_fifo(cx, buf);
+        }
+        #[cfg(not(feature = "stream"))]
+        {
+            this.platform.poll_read(cx, buf)
+        }
     }
 }
 

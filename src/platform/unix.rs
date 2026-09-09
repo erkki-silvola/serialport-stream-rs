@@ -1,4 +1,6 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+#[cfg(not(feature = "stream"))]
+use std::io::Read;
 use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -7,6 +9,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use async_io::Async;
+#[cfg(not(feature = "stream"))]
 use futures::io::AsyncRead as _;
 use futures::io::AsyncWrite as _;
 use nix::errno::Errno;
@@ -24,9 +27,11 @@ use crate::{EventsInnerWrite, SerialPortStreamBuilder};
 
 mod serial;
 
+#[cfg(not(feature = "stream"))]
 #[derive(Debug)]
 struct SerialRead(OwnedFd);
 
+#[cfg(not(feature = "stream"))]
 impl Read for SerialRead {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match nix::unistd::read(self.0.as_fd(), buf) {
@@ -37,12 +42,14 @@ impl Read for SerialRead {
     }
 }
 
+#[cfg(not(feature = "stream"))]
 impl AsFd for SerialRead {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
 }
 
+#[cfg(not(feature = "stream"))]
 unsafe impl async_io::IoSafe for SerialRead {}
 
 #[derive(Debug)]
@@ -78,6 +85,7 @@ struct UnixInner {
 
 #[derive(Debug)]
 pub struct PlatformStream {
+    #[cfg(not(feature = "stream"))]
     read_async: Async<SerialRead>,
     write_async: Async<SerialWrite>,
     flush_fd: OwnedFd,
@@ -126,12 +134,14 @@ impl PlatformStream {
             serial::clear(port.as_raw_fd(), buffer)?;
         }
         let port_fd = port.as_fd();
+        #[cfg(not(feature = "stream"))]
         let read_fd = nix::unistd::dup(port_fd)?;
         let write_fd = nix::unistd::dup(port_fd)?;
         let flush_fd = nix::unistd::dup(port_fd)?;
+        #[cfg(not(feature = "stream"))]
+        let read_async = Async::new_nonblocking(SerialRead(read_fd))?;
         #[cfg(feature = "stream")]
         let stream_read_fd = Some(nix::unistd::dup(port_fd)?);
-        let read_async = Async::new_nonblocking(SerialRead(read_fd))?;
         let write_async = Async::new_nonblocking(SerialWrite(write_fd))?;
         drop(port);
 
@@ -139,6 +149,7 @@ impl PlatformStream {
         let cancel_pipe = nix::unistd::pipe().unwrap();
 
         Ok(Self {
+            #[cfg(not(feature = "stream"))]
             read_async,
             write_async,
             flush_fd,
@@ -162,6 +173,7 @@ impl PlatformStream {
         blocking::unblock(move || serial::flush_output(fd))
     }
 
+    #[cfg(not(feature = "stream"))]
     pub fn poll_read(
         &mut self,
         cx: &mut Context<'_>,
@@ -225,7 +237,8 @@ impl PlatformStream {
                 let did_read = match nix::unistd::read(borrowed_fd, buffer) {
                     Ok(n) => n,
                     Err(Errno::EAGAIN) => {
-                        trace_info!("EAGAIN for read");
+                        #[cfg(feature = "tracing")]
+                        tracing::info!("EAGAIN for read");
                         0
                     }
                     Err(e) => return Err(std::io::Error::from(e)),

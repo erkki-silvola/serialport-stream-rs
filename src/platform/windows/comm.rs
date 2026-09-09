@@ -2,7 +2,7 @@ use std::io;
 use std::mem::MaybeUninit;
 
 use windows_sys::Win32::Devices::Communication::*;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 
 use crate::types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
@@ -215,6 +215,11 @@ pub fn flush_output(handle: super::HandleWrapper) -> io::Result<()> {
     if unsafe { FlushFileBuffers(handle.raw()) } != 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_INVALID_FUNCTION as i32) {
+            Ok(())
+        } else {
+            Err(err)
+        }
     }
 }

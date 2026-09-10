@@ -20,49 +20,13 @@ use crate::{EventsInnerWrite, SerialPortStreamBuilder};
 
 mod comm;
 
-#[cfg(feature = "stream")]
-/// OVERLAPPED wrapper for the `stream` feature background thread.
-struct Overlapped(OVERLAPPED);
-
-#[cfg(feature = "stream")]
-impl Overlapped {
-    fn new() -> io::Result<Self> {
-        let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
-        if event.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.hEvent = event;
-        Ok(Self(overlapped))
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
-        &mut self.0
-    }
-
-    fn reset(&mut self) -> io::Result<()> {
-        if unsafe { ResetEvent(self.0.hEvent as HANDLE) } == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "stream")]
-impl Drop for Overlapped {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0.hEvent as HANDLE);
-        }
-    }
-}
-
-struct InFlightOp {
+/// OVERLAPPED wrapper with an owned event handle.
+struct Overlapped {
     _event: OwnedHandle,
-    overlapped: Box<OVERLAPPED>,
+    overlapped: OVERLAPPED,
 }
 
-impl InFlightOp {
+impl Overlapped {
     fn new() -> io::Result<Self> {
         let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
         if event.is_null() {
@@ -73,12 +37,40 @@ impl InFlightOp {
         overlapped.hEvent = owned.as_raw_handle() as HANDLE;
         Ok(Self {
             _event: owned,
-            overlapped: Box::new(overlapped),
+            overlapped,
         })
     }
 
     fn event(&self) -> HANDLE {
         self.overlapped.hEvent
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut OVERLAPPED {
+        &mut self.overlapped
+    }
+
+    #[cfg(feature = "stream")]
+    fn reset(&mut self) -> io::Result<()> {
+        if unsafe { ResetEvent(self._event.as_raw_handle() as HANDLE) } == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+struct InFlightOp {
+    overlapped: Box<Overlapped>,
+}
+
+impl InFlightOp {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            overlapped: Box::new(Overlapped::new()?),
+        })
+    }
+
+    fn event(&self) -> HANDLE {
+        self.overlapped.event()
     }
 }
 
@@ -328,13 +320,18 @@ impl PlatformStream {
                         read_buf.as_mut_ptr() as *mut _,
                         read_buf.len() as u32,
                         ptr::null_mut(),
-                        op.overlapped.as_mut(),
+                        op.overlapped.as_mut_ptr(),
                     )
                 };
                 if ok != FALSE {
                     let mut bytes_read: u32 = 0;
                     if unsafe {
-                        GetOverlappedResult(handle, op.overlapped.as_mut(), &mut bytes_read, TRUE)
+                        GetOverlappedResult(
+                            handle,
+                            op.overlapped.as_mut_ptr(),
+                            &mut bytes_read,
+                            TRUE,
+                        )
                     } == FALSE
                     {
                         return Poll::Ready(Err(io::Error::last_os_error()));
@@ -378,7 +375,7 @@ impl PlatformStream {
                     }
                     Poll::Ready(Err(err)) => {
                         shared.wait.clear();
-                        cancel_overlapped(handle, op.overlapped.as_mut());
+                        cancel_overlapped(handle, op.overlapped.as_mut_ptr());
                         Poll::Ready(Err(err))
                     }
                 }
@@ -429,7 +426,7 @@ impl PlatformStream {
                         buf.as_ptr() as *const _,
                         buf.len() as u32,
                         ptr::null_mut(),
-                        op.overlapped.as_mut(),
+                        op.overlapped.as_mut_ptr(),
                     )
                 };
                 if ok != FALSE {
@@ -437,7 +434,7 @@ impl PlatformStream {
                     if unsafe {
                         GetOverlappedResult(
                             handle,
-                            op.overlapped.as_mut(),
+                            op.overlapped.as_mut_ptr(),
                             &mut bytes_written,
                             TRUE,
                         )
@@ -474,7 +471,7 @@ impl PlatformStream {
                     }
                     Poll::Ready(Err(err)) => {
                         shared.wait.clear();
-                        cancel_overlapped(handle, op.overlapped.as_mut());
+                        cancel_overlapped(handle, op.overlapped.as_mut_ptr());
                         Poll::Ready(Err(err))
                     }
                 }
@@ -522,7 +519,7 @@ impl PlatformStream {
 
             if unsafe { GetLastError() } == ERROR_IO_PENDING {
                 // Wait for either comm event or abort signal
-                let objects = [event_overlapped.0.hEvent as HANDLE, abort_event.raw()];
+                let objects = [event_overlapped.event(), abort_event.raw()];
 
                 match unsafe {
                     WaitForMultipleObjects(
@@ -599,7 +596,7 @@ impl PlatformStream {
             } == FALSE
             {
                 if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    match unsafe { WaitForSingleObject(overlapped.0.hEvent as HANDLE, INFINITE) } {
+                    match unsafe { WaitForSingleObject(overlapped.event(), INFINITE) } {
                         WAIT_OBJECT_0 => {
                             if unsafe {
                                 GetOverlappedResult(
@@ -635,7 +632,10 @@ impl PlatformStream {
     }
 }
 
-unsafe extern "system" fn overlapped_wait_callback(context: *mut std::ffi::c_void, _timed_out: bool) {
+unsafe extern "system" fn overlapped_wait_callback(
+    context: *mut std::ffi::c_void,
+    _timed_out: bool,
+) {
     let wait = &*(context as *const OverlappedWait);
     wait.wait_handle.store(ptr::null_mut(), Ordering::Release);
     wait.waker.wake();
@@ -666,27 +666,22 @@ fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<
 fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
     let event = op.event();
     match unsafe { WaitForSingleObjectEx(event, 0, TRUE) } {
-        WAIT_OBJECT_0 => finish_overlapped(port, op.overlapped.as_mut(), event),
+        WAIT_OBJECT_0 => {
+            let mut bytes = 0u32;
+            let res =
+                unsafe { GetOverlappedResult(port, op.overlapped.as_mut_ptr(), &mut bytes, TRUE) };
+            if res == FALSE {
+                let err = io::Error::last_os_error();
+                return Poll::Ready(Err(err));
+            }
+            Poll::Ready(Ok(bytes))
+        }
         WAIT_TIMEOUT => Poll::Pending,
         WAIT_FAILED => Poll::Ready(Err(io::Error::last_os_error())),
         _ => Poll::Ready(Err(io::Error::other(
             "unexpected WaitForSingleObjectEx result",
         ))),
     }
-}
-
-fn finish_overlapped(
-    port: HANDLE,
-    overlapped: &mut OVERLAPPED,
-    _event: HANDLE,
-) -> Poll<io::Result<u32>> {
-    let mut bytes = 0u32;
-    let res = unsafe { GetOverlappedResult(port, overlapped, &mut bytes, TRUE) };
-    if res == FALSE {
-        let err = io::Error::last_os_error();
-        return Poll::Ready(Err(err));
-    }
-    Poll::Ready(Ok(bytes))
 }
 
 fn cancel_overlapped(handle: HANDLE, overlapped: *mut OVERLAPPED) {
@@ -709,13 +704,13 @@ impl Drop for PlatformStream {
         {
             self.read_shared.wait.clear();
             if let ReadIoState::InFlight { op, .. } = &mut *self.read_shared.state.lock().unwrap() {
-                cancel_overlapped(self.read_port.raw(), op.overlapped.as_mut());
+                cancel_overlapped(self.read_port.raw(), op.overlapped.as_mut_ptr());
             }
         }
 
         self.write_shared.wait.clear();
         if let IoState::InFlight(op) = &mut *self.write_shared.state.lock().unwrap() {
-            cancel_overlapped(self.write_port.raw(), op.overlapped.as_mut());
+            cancel_overlapped(self.write_port.raw(), op.overlapped.as_mut_ptr());
         }
     }
 }

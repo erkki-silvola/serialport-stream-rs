@@ -12,7 +12,7 @@
 //! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`try_poll_next`]. Starts a
 //!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
 //!   thread on Windows). With `stream` enabled, [`AsyncRead`] and [`Stream`] share that FIFO.
-//! - **`tracing`** (optional): diagnostic logs for EAGAIN retries and receive-buffer diagnostics.
+//! - **`tracing`** (optional): diagnostic logs.
 //!
 //! ## Read paths
 //!
@@ -356,7 +356,11 @@ impl SerialPortStream {
     }
 
     #[cfg(feature = "stream")]
-    fn poll_read_fifo(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_read_fifo(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
         match self.poll_receiver_ready(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),

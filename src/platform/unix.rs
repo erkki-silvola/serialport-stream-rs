@@ -1,6 +1,6 @@
-use std::io::{self, Write};
 #[cfg(not(feature = "stream"))]
 use std::io::Read;
+use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};

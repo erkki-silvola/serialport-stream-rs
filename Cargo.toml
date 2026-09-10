@@ -11,6 +11,9 @@ keywords = ["serialport", "async", "stream", "futures"]
 categories = ["asynchronous", "hardware-support"]
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 stream = []

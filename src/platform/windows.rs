@@ -82,12 +82,12 @@ impl InFlightOp {
     }
 }
 
-struct OverlapWait {
+struct OverlappedWait {
     waker: AtomicWaker,
     wait_handle: AtomicPtr<std::ffi::c_void>,
 }
 
-impl OverlapWait {
+impl OverlappedWait {
     const fn new() -> Self {
         Self {
             waker: AtomicWaker::new(),
@@ -112,7 +112,7 @@ enum IoState {
 
 struct WriteShared {
     state: Mutex<IoState>,
-    wait: OverlapWait,
+    wait: OverlappedWait,
 }
 
 unsafe impl Send for WriteShared {}
@@ -141,7 +141,7 @@ enum ReadIoState {
 #[cfg(not(feature = "stream"))]
 struct ReadShared {
     state: Mutex<ReadIoState>,
-    wait: OverlapWait,
+    wait: OverlappedWait,
 }
 
 #[cfg(not(feature = "stream"))]
@@ -284,7 +284,7 @@ impl PlatformStream {
 
         #[cfg(not(feature = "stream"))]
         let read_port = HandleWrapper::new(port.raw());
-        let write_port = HandleWrapper::new(port.raw());//Self::duplicate_handle(port.raw())?);
+        let write_port = HandleWrapper::new(port.raw());
 
         Ok(Self {
             #[cfg(feature = "stream")]
@@ -296,13 +296,13 @@ impl PlatformStream {
             #[cfg(not(feature = "stream"))]
             read_shared: Arc::new(ReadShared {
                 state: Mutex::new(ReadIoState::Idle),
-                wait: OverlapWait::new(),
+                wait: OverlappedWait::new(),
             }),
             #[cfg(not(feature = "stream"))]
             read_port,
             write_shared: Arc::new(WriteShared {
                 state: Mutex::new(IoState::Idle),
-                wait: OverlapWait::new(),
+                wait: OverlappedWait::new(),
             }),
             write_port,
             port: Some(port),
@@ -348,7 +348,7 @@ impl PlatformStream {
                     return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
                 }
                 let event = op.event();
-                if let Err(err) = register_overlap_wait(&shared.wait, event) {
+                if let Err(err) = register_overlapped_wait(&shared.wait, event) {
                     return Poll::Ready(Err(err));
                 }
                 *state = ReadIoState::InFlight {
@@ -452,7 +452,7 @@ impl PlatformStream {
                     return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
                 }
                 let event = op.event();
-                if let Err(err) = register_overlap_wait(&shared.wait, event) {
+                if let Err(err) = register_overlapped_wait(&shared.wait, event) {
                     return Poll::Ready(Err(err));
                 }
                 *state = IoState::InFlight(op);
@@ -536,7 +536,12 @@ impl PlatformStream {
                         // note could check if mask == 0, but still need to wait the object signal
                         let mut len = 0;
                         if unsafe {
-                            GetOverlappedResult(handle, event_overlapped.as_mut_ptr(), &mut len, 1)
+                            GetOverlappedResult(
+                                handle,
+                                event_overlapped.as_mut_ptr(),
+                                &mut len,
+                                TRUE,
+                            )
                         } == FALSE
                         {
                             return Err(io::Error::last_os_error());
@@ -601,7 +606,7 @@ impl PlatformStream {
                                     handle,
                                     overlapped.as_mut_ptr(),
                                     &mut bytes_read,
-                                    1,
+                                    TRUE,
                                 )
                             } == FALSE
                             {
@@ -628,41 +633,22 @@ impl PlatformStream {
         }
         Ok(())
     }
-
-    fn duplicate_handle(handle: HANDLE) -> io::Result<HANDLE> {
-        let mut dup = ptr::null_mut();
-        if unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                handle,
-                GetCurrentProcess(),
-                &mut dup,
-                0,
-                FALSE,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == FALSE
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(dup)
-    }
 }
 
-unsafe extern "system" fn overlap_wait_callback(context: *mut std::ffi::c_void, _timed_out: bool) {
-    let wait = &*(context as *const OverlapWait);
+unsafe extern "system" fn overlapped_wait_callback(context: *mut std::ffi::c_void, _timed_out: bool) {
+    let wait = &*(context as *const OverlappedWait);
     wait.wait_handle.store(ptr::null_mut(), Ordering::Release);
     wait.waker.wake();
 }
 
-fn register_overlap_wait(wait: &OverlapWait, event: HANDLE) -> io::Result<()> {
+fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<()> {
     if wait.wait_handle.load(Ordering::Acquire) == ptr::null_mut() {
         let mut wait_handle = ptr::null_mut();
         let ok = unsafe {
             RegisterWaitForSingleObject(
                 &mut wait_handle,
                 event,
-                Some(overlap_wait_callback),
+                Some(overlapped_wait_callback),
                 wait as *const _ as *const std::ffi::c_void,
                 INFINITE,
                 WT_EXECUTEONLYONCE,

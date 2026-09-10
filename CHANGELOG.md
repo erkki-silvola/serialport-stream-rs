@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+##### Added
+
+* Optional `stream` Cargo feature: [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html), [`TryStreamExt`](https://docs.rs/futures/latest/futures/stream/trait.TryStreamExt.html), and background receive FIFO on Unix and Windows. Examples `read_stream` and `tokio_read_stream` require this feature.
+
+##### Changed
+
+* Default [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) polls the port directly (async-io on Unix, overlapped `ReadFile` + thread-pool reactor on Windows) instead of always using a background receive thread.
+* Default [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) uses async-io on Unix and overlapped `WriteFile` + thread-pool reactor on Windows; the dedicated background write thread is removed.
+* Unix adds an `async-io` dependency for default read/write paths.
+
+##### Removed
+
+* Always-on background read thread and shared receive FIFO; enable the `stream` feature for the previous FIFO-based read path and `Stream` support.
+
 ## [0.3.2] - 2026-07-06
 
 ##### Added

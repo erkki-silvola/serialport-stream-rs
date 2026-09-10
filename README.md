@@ -28,9 +28,14 @@ Examples below also use `futures-lite` (blocking) or `tokio`.
 | Platform | `AsyncRead` | `Stream` / `try_next` (`stream` feature) |
 | --- | --- | --- |
 | **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port | Poll-based background read thread → FIFO |
-| **Windows** | Overlapped `ReadFile` + async-io `Waitable` | Background read thread → FIFO |
+| **Windows** | Overlapped `ReadFile` + thread-pool reactor | `WaitCommEvent` background read thread → FIFO |
 
-With `stream` enabled, use either `AsyncRead` or `Stream` per open port — not both (Unix and Windows).
+With the `stream` feature, `AsyncRead` also reads from the FIFO. Do not mix `Stream` / `try_next` and `AsyncRead` on the same port — that can split messages across calls.
+
+| API | Each call returns |
+| --- | --- |
+| `Stream` / `try_next` | All bytes in the FIFO (buffer drained) |
+| `AsyncRead` | Up to your buffer length; remainder stays in the FIFO |
 
 There is no backpressure on FIFO paths; the buffer can grow without bound.
 
@@ -39,7 +44,7 @@ There is no backpressure on FIFO paths; the buffer can grow without bound.
 | Platform | `AsyncWrite` |
 | --- | --- |
 | **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port |
-| **Windows** | Overlapped `WriteFile` + async-io `Waitable` |
+| **Windows** | Overlapped `WriteFile` + thread-pool reactor |
 
 ## Usage
 
@@ -110,7 +115,7 @@ Example: `cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB
 
 ### Writing
 
-[`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) is re-exported. On Unix, writes use async-io; on Windows, overlapped `WriteFile` with async-io `Waitable`.
+[`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) is re-exported. On Unix, writes use async-io; on Windows, overlapped `WriteFile` with a thread-pool completion reactor.
 
 ```rust
 use serialport_stream::{new, AsyncWriteExt};

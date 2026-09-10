@@ -2,14 +2,14 @@
 //!
 //! Async runtime agnostic: this crate implements [`futures`] traits only and does not depend on
 //! Tokio, async-std, or any other executor. Use it with any runtime that polls those futures
-//! (Tokio, async-std, [`futures_lite::future::block_on`], etc.).
+//! (Tokio, async-std, [`futures_lite::future::block_on`](https://docs.rs/futures-lite/latest/futures_lite/future/fn.block_on.html), etc.).
 //!
 //! Configure and open ports with [`new`] → [`SerialPortStreamBuilder`] → [`.open()`](SerialPortStreamBuilder::open).
 //! Line settings, DTR, and buffer clearing are applied at open time.
 //!
 //! ## Features
 //!
-//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`try_poll_next`]. Starts a
+//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`SerialPortStream::try_poll_next`]. Starts a
 //!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
 //!   thread on Windows). With `stream` enabled, [`AsyncRead`] and [`Stream`] share that FIFO.
 //! - **`tracing`** (optional): diagnostic logs.
@@ -285,7 +285,7 @@ pub fn new<'a>(
 /// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
 /// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a thread-pool completion reactor.
 ///
-/// Enable the `stream` feature for [`Stream`] / [`try_poll_next`]. That starts a background receive
+/// Enable the `stream` feature for [`Stream`] / [`SerialPortStream::try_poll_next`]. That starts a background receive
 /// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
 /// from the same FIFO.
 ///

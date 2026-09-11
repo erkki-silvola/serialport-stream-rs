@@ -46,7 +46,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 mod platform;
@@ -56,14 +55,6 @@ pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
 use crate::platform::PlatformStream;
-use futures::task::AtomicWaker;
-
-fn clone_io_error(err: &std::io::Error) -> std::io::Error {
-    match err.raw_os_error() {
-        Some(code) => std::io::Error::from_raw_os_error(code),
-        None => std::io::Error::new(err.kind(), err.to_string()),
-    }
-}
 
 pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::io::{AsyncWrite, AsyncWriteExt};
@@ -84,21 +75,6 @@ impl EventsInnerRead {
         Self {
             in_buffer: Mutex::new(Vec::new()),
             stream_error: Mutex::new(None),
-            waker: AtomicWaker::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct EventsInnerWrite {
-    pub(crate) write_error: Mutex<Option<std::io::Error>>,
-    pub(crate) waker: AtomicWaker,
-}
-
-impl EventsInnerWrite {
-    pub(crate) fn new() -> Self {
-        Self {
-            write_error: Mutex::new(None),
             waker: AtomicWaker::new(),
         }
     }
@@ -220,7 +196,6 @@ impl SerialPortStreamBuilder {
     /// Applies line settings, [`dtr_on_open`](Self::dtr_on_open), and optional
     /// [`clear`](Self::clear) before async I/O begins.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
-        let write_inner = Arc::new(EventsInnerWrite::new());
         #[cfg(feature = "stream")]
         let read_inner = Arc::new(EventsInnerRead::new());
         Ok(SerialPortStream {
@@ -228,11 +203,9 @@ impl SerialPortStreamBuilder {
                 self,
                 #[cfg(feature = "stream")]
                 read_inner.clone(),
-                write_inner.clone(),
             )?,
             #[cfg(feature = "stream")]
             read_inner,
-            write_inner,
             flush_task: None,
             write_in_flight: false,
         })
@@ -312,7 +285,6 @@ pub struct SerialPortStream {
     platform: PlatformStream,
     #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
-    write_inner: Arc<EventsInnerWrite>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
     write_in_flight: bool,
 }
@@ -321,7 +293,6 @@ impl std::fmt::Debug for SerialPortStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SerialPortStream")
             .field("platform", &self.platform)
-            .field("write_inner", &self.write_inner)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
             .field("write_in_flight", &self.write_in_flight)
             .finish()
@@ -343,16 +314,6 @@ impl SerialPortStream {
         }
 
         Poll::Ready(Ok(()))
-    }
-
-    fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
-        self.write_inner.waker.register(cx.waker());
-
-        if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
-            return Err(clone_io_error(err));
-        }
-
-        Ok(())
     }
 
     #[cfg(feature = "stream")]
@@ -449,22 +410,13 @@ impl AsyncWrite for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        let result = match this.poll_writer_ready(cx) {
-            Err(e) => Poll::Ready(Err(e)),
-            Ok(()) => this.platform.poll_write(cx, buf),
-        };
+        let result = this.platform.poll_write(cx, buf);
         this.write_in_flight = result.is_pending();
         result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.as_mut().get_mut();
-
-        this.write_inner.waker.register(cx.waker());
-
-        if let Some(err) = this.write_inner.write_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Err(clone_io_error(err)));
-        }
 
         if this.write_in_flight {
             return Poll::Pending;

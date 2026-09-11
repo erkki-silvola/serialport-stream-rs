@@ -23,7 +23,7 @@ use std::sync::mpsc;
 
 #[cfg(feature = "stream")]
 use crate::EventsInnerRead;
-use crate::{EventsInnerWrite, SerialPortStreamBuilder};
+use crate::SerialPortStreamBuilder;
 
 mod serial;
 
@@ -127,7 +127,6 @@ impl PlatformStream {
     pub fn new(
         builder: SerialPortStreamBuilder,
         #[cfg(feature = "stream")] read_inner: Arc<EventsInnerRead>,
-        _write_inner: Arc<EventsInnerWrite>,
     ) -> Result<Self, std::io::Error> {
         let port = serial::open_port(&builder)?;
         if let Some(buffer) = builder.clear_buffer {

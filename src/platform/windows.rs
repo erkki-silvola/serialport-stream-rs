@@ -16,7 +16,7 @@ use windows_sys::Win32::System::IO::*;
 
 #[cfg(feature = "stream")]
 use crate::EventsInnerRead;
-use crate::{EventsInnerWrite, SerialPortStreamBuilder};
+use crate::SerialPortStreamBuilder;
 
 mod comm;
 
@@ -209,7 +209,6 @@ impl PlatformStream {
     pub fn new(
         builder: SerialPortStreamBuilder,
         #[cfg(feature = "stream")] read_inner: Arc<EventsInnerRead>,
-        _write_inner: Arc<EventsInnerWrite>,
     ) -> io::Result<Self> {
         let path = &builder.path;
         let mut name = Vec::<u16>::with_capacity(4 + path.len() + 1);
@@ -250,9 +249,9 @@ impl PlatformStream {
         }
 
         let timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: 1,        //u32::MAX,
-            ReadTotalTimeoutMultiplier: 0, //u32::MAX,
-            ReadTotalTimeoutConstant: 0,   //u32::MAX - 1,
+            ReadIntervalTimeout: 1,
+            ReadTotalTimeoutMultiplier: 0,
+            ReadTotalTimeoutConstant: 0,
             WriteTotalTimeoutMultiplier: 0,
             WriteTotalTimeoutConstant: 0,
         };
@@ -275,8 +274,8 @@ impl PlatformStream {
         };
 
         #[cfg(not(feature = "stream"))]
-        let read_port = HandleWrapper::new(port.raw());
-        let write_port = HandleWrapper::new(port.raw());
+        let read_port = port.clone();
+        let write_port = port.clone();
 
         Ok(Self {
             #[cfg(feature = "stream")]
@@ -354,32 +353,22 @@ impl PlatformStream {
                 };
                 Poll::Pending
             }
-            ReadIoState::InFlight { .. } => {
-                let (mut op, read_buf) = match std::mem::replace(&mut *state, ReadIoState::Idle) {
-                    ReadIoState::InFlight { op, buffer } => (op, buffer),
-                    _ => unreachable!(),
-                };
-                match poll_in_flight(handle, &mut op) {
-                    Poll::Pending => {
-                        *state = ReadIoState::InFlight {
-                            op,
-                            buffer: read_buf,
-                        };
-                        Poll::Pending
-                    }
-                    Poll::Ready(Ok(bytes)) => {
-                        shared.wait.clear();
-                        let n = bytes as usize;
-                        buf[..n].copy_from_slice(&read_buf[..n]);
-                        Poll::Ready(Ok(n))
-                    }
-                    Poll::Ready(Err(err)) => {
-                        shared.wait.clear();
-                        cancel_overlapped(handle, op.overlapped.as_mut_ptr());
-                        Poll::Ready(Err(err))
-                    }
+            ReadIoState::InFlight { ref mut op, buffer } => match poll_in_flight(handle, op) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(bytes)) => {
+                    shared.wait.clear();
+                    let n = bytes as usize;
+                    buf[..n].copy_from_slice(&buffer[..n]);
+                    *state = ReadIoState::Idle;
+                    Poll::Ready(Ok(n))
                 }
-            }
+                Poll::Ready(Err(err)) => {
+                    shared.wait.clear();
+                    cancel_overlapped(handle, op.overlapped.as_mut_ptr());
+                    *state = ReadIoState::Idle;
+                    Poll::Ready(Err(err))
+                }
+            },
         }
     }
 
@@ -455,27 +444,20 @@ impl PlatformStream {
                 *state = IoState::InFlight(op);
                 Poll::Pending
             }
-            IoState::InFlight(_) => {
-                let mut op = match std::mem::replace(&mut *state, IoState::Idle) {
-                    IoState::InFlight(op) => op,
-                    _ => unreachable!(),
-                };
-                match poll_in_flight(handle, &mut op) {
-                    Poll::Pending => {
-                        *state = IoState::InFlight(op);
-                        Poll::Pending
-                    }
-                    Poll::Ready(Ok(bytes)) => {
-                        shared.wait.clear();
-                        Poll::Ready(Ok(bytes as usize))
-                    }
-                    Poll::Ready(Err(err)) => {
-                        shared.wait.clear();
-                        cancel_overlapped(handle, op.overlapped.as_mut_ptr());
-                        Poll::Ready(Err(err))
-                    }
+            IoState::InFlight(ref mut op) => match poll_in_flight(handle, op) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(bytes)) => {
+                    shared.wait.clear();
+                    *state = IoState::Idle;
+                    Poll::Ready(Ok(bytes as usize))
                 }
-            }
+                Poll::Ready(Err(err)) => {
+                    shared.wait.clear();
+                    cancel_overlapped(handle, op.overlapped.as_mut_ptr());
+                    *state = IoState::Idle;
+                    Poll::Ready(Err(err))
+                }
+            },
         }
     }
 
@@ -642,7 +624,7 @@ unsafe extern "system" fn overlapped_wait_callback(
 }
 
 fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<()> {
-    if wait.wait_handle.load(Ordering::Acquire) == ptr::null_mut() {
+    if wait.wait_handle.load(Ordering::Acquire).is_null() {
         let mut wait_handle = ptr::null_mut();
         let ok = unsafe {
             RegisterWaitForSingleObject(
@@ -657,8 +639,7 @@ fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<
         if ok == FALSE {
             return Err(io::Error::last_os_error());
         }
-        wait.wait_handle
-            .store(wait_handle as *mut std::ffi::c_void, Ordering::Release);
+        wait.wait_handle.store(wait_handle, Ordering::Release);
     }
     Ok(())
 }

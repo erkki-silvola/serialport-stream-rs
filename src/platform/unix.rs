@@ -5,6 +5,7 @@ use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::pin::Pin;
+#[cfg(feature = "stream")]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 

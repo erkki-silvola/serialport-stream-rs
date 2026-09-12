@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
             }
 
             res = async {
-               // stream.write_all(WRITE_PAYLOAD).await?;
-               // stream.flush().await?;
+                stream.write_all(WRITE_PAYLOAD).await?;
+                stream.flush().await?;
                 println!("payload {:02X?} written and flushed", WRITE_PAYLOAD);
                 let mut buf = [0u8; 256];
                 let len = stream.read(&mut buf).await?;

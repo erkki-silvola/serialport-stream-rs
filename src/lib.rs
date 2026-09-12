@@ -47,6 +47,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+#[cfg(feature = "stream")]
+use std::sync::{Arc, Mutex};
 
 mod platform;
 mod types;
@@ -55,6 +57,16 @@ pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
 use crate::platform::PlatformStream;
+#[cfg(feature = "stream")]
+use futures::task::AtomicWaker;
+
+#[cfg(feature = "stream")]
+fn clone_io_error(err: &std::io::Error) -> std::io::Error {
+    match err.raw_os_error() {
+        Some(code) => std::io::Error::from_raw_os_error(code),
+        None => std::io::Error::new(err.kind(), err.to_string()),
+    }
+}
 
 pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::io::{AsyncWrite, AsyncWriteExt};

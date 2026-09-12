@@ -156,31 +156,21 @@ impl std::fmt::Debug for ReadShared {
     }
 }
 
-/// Sole owner of a raw port `HANDLE`; closes it via `CloseHandle` on drop.
-#[derive(Debug)]
-struct PortHandle(HANDLE);
-
-unsafe impl Send for PortHandle {}
-unsafe impl Sync for PortHandle {}
-
-impl Drop for PortHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-struct HandleWrapper(Arc<PortHandle>);
+struct HandleWrapper(Arc<OwnedHandle>);
+
+unsafe impl Send for HandleWrapper {}
+unsafe impl Sync for HandleWrapper {}
 
 impl HandleWrapper {
     fn new(handle: HANDLE) -> Self {
-        Self(Arc::new(PortHandle(handle)))
+        Self(Arc::new(unsafe {
+            OwnedHandle::from_raw_handle(handle as RawHandle)
+        }))
     }
 
     fn raw(&self) -> HANDLE {
-        self.0 .0
+        self.0.as_raw_handle() as HANDLE
     }
 }
 

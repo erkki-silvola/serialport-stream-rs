@@ -46,9 +46,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 #[cfg(feature = "stream")]
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 mod platform;
 mod types;

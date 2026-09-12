@@ -328,16 +328,6 @@ impl SerialPortStream {
         Poll::Ready(Ok(()))
     }
 
-    #[cfg(all(feature = "stream", feature = "tracing"))]
-    fn log_fifo(cached_bytes: usize) {
-        if cached_bytes > 0 {
-            tracing::info!(
-                cached_bytes,
-                "serialport-stream receive buffer after AsyncRead read"
-            );
-        }
-    }
-
     #[cfg(feature = "stream")]
     fn poll_read_fifo(
         &mut self,
@@ -356,7 +346,14 @@ impl SerialPortStream {
                 buf[..n].copy_from_slice(&buffer[..n]);
                 buffer.drain(..n);
                 #[cfg(feature = "tracing")]
-                Self::log_fifo(buffer.len());
+                {
+                    if buffer.len() > 0 {
+                        tracing::info!(
+                            cached_bytes = buffer.len(),
+                            "serialport-stream FIFO after AsyncRead read"
+                        );
+                    }
+                }
                 Poll::Ready(Ok(n))
             }
         }

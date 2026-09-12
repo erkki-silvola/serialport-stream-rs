@@ -1,3 +1,10 @@
+//! Blocking Stream example (`futures_lite::stream::block_on`).
+//!
+//! Run:
+//! ```text
+//! cargo run --example read_stream --features stream -- /dev/ttyUSB0 115200
+//! ```
+
 use std::thread::JoinHandle;
 
 use clap::{Arg, Command};

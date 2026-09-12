@@ -1,3 +1,10 @@
+//! Stream reads with Tokio (`try_next`).
+//!
+//! Run:
+//! ```text
+//! cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB0 115200
+//! ```
+
 use anyhow::Result;
 use clap::{Arg, Command};
 use futures_lite::stream::StreamExt;

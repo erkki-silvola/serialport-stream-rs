@@ -1,51 +1,54 @@
-//! Async serial port I/O as [`Stream`], [`AsyncRead`], and [`AsyncWrite`].
+//! Async serial port I/O as [`AsyncRead`] and [`AsyncWrite`], with optional [`Stream`] support.
 //!
 //! Async runtime agnostic: this crate implements [`futures`] traits only and does not depend on
 //! Tokio, async-std, or any other executor. Use it with any runtime that polls those futures
-//! (Tokio, async-std, [`futures_lite::future::block_on`], etc.).
+//! (Tokio, async-std, [`futures_lite::future::block_on`](https://docs.rs/futures-lite/latest/futures_lite/future/fn.block_on.html), etc.).
 //!
 //! Configure and open ports with [`new`] → [`SerialPortStreamBuilder`] → [`.open()`](SerialPortStreamBuilder::open).
 //! Line settings, DTR, and buffer clearing are applied at open time.
 //!
-//! POSIX `termios` on Unix; Win32 COMM APIs on Windows. Configuration types ([`DataBits`],
-//! [`Parity`], [`StopBits`], [`FlowControl`], [`ClearBuffer`]) are defined in this crate.
+//! ## Features
 //!
-//! Optional [`tracing`] logs (EAGAIN/EINTR retries, receive-buffer diagnostics) are enabled with
-//! the `tracing` Cargo feature.
+//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`SerialPortStream::try_poll_next`]. Starts a
+//!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
+//!   thread on Windows). With `stream` enabled, [`AsyncRead`] and [`Stream`] share that FIFO.
+//! - **`tracing`** (optional): diagnostic logs.
 //!
-//! The first read poll starts a background thread that appends incoming bytes to an in-memory FIFO
-//! shared by [`Stream`] and [`AsyncRead`]. There is no backpressure.
+//! ## Read paths
 //!
-//! [`Stream`] / [`TryStreamExt::try_next`] drains the full FIFO per item; [`AsyncRead`] reads
-//! partially and leaves the remainder cached. Use one read style per open port.
+//! | Platform | [`AsyncRead`] (no `stream`) | [`AsyncRead`] + [`Stream`] (`stream` feature) |
+//! | --- | --- | --- |
+//! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Shared poll-based background thread → FIFO |
+//! | Windows | Overlapped `ReadFile` + thread-pool reactor | Shared background read thread → FIFO |
 //!
-//! [`AsyncWriteExt`], [`AsyncReadExt`], and [`TryStreamExt`] are re-exported from `futures`.
+//! When `stream` is enabled, [`AsyncRead`] and [`Stream`] share the same background receive FIFO
+//! (Unix and Windows).
+//!
+//! ## Write path
+//!
+//! On Unix, [`AsyncWrite`] uses [`async-io`](https://docs.rs/async-io). On Windows, overlapped
+//! `WriteFile` with a dedicated thread-pool completion reactor.
+//!
+//! [`AsyncReadExt`] and [`AsyncWriteExt`] are re-exported from `futures`.
 //!
 //! ```no_run
-//! use serialport_stream::{new, AsyncWriteExt, TryStreamExt};
+//! use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
 //!
 //! # async fn example() -> std::io::Result<()> {
 //! let mut stream = new("/dev/ttyUSB0", 115200).open()?;
 //! stream.write_all(b"PING\r\n").await?;
-//! while let Some(chunk) = stream.try_next().await? {
-//!     println!("{chunk:?}");
-//! }
+//! let mut buf = [0u8; 256];
+//! let n = stream.read(&mut buf).await?;
+//! # let _ = n;
 //! # Ok(())
 //! # }
 //! ```
-//!
 
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(feature = "stream")]
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-
-macro_rules! trace_info {
-    ($($tt:tt)*) => {
-        #[cfg(feature = "tracing")]
-        tracing::info!($($tt)*);
-    };
-}
 
 mod platform;
 mod types;
@@ -54,8 +57,10 @@ pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
 use crate::platform::PlatformStream;
+#[cfg(feature = "stream")]
 use futures::task::AtomicWaker;
 
+#[cfg(feature = "stream")]
 fn clone_io_error(err: &std::io::Error) -> std::io::Error {
     match err.raw_os_error() {
         Some(code) => std::io::Error::from_raw_os_error(code),
@@ -65,35 +70,23 @@ fn clone_io_error(err: &std::io::Error) -> std::io::Error {
 
 pub use futures::io::{AsyncRead, AsyncReadExt};
 pub use futures::io::{AsyncWrite, AsyncWriteExt};
+#[cfg(feature = "stream")]
 pub use futures::stream::{Stream, TryStreamExt};
 
 #[derive(Debug)]
+#[cfg(feature = "stream")]
 pub(crate) struct EventsInnerRead {
     pub(crate) in_buffer: Mutex<Vec<u8>>,
     pub(crate) stream_error: Mutex<Option<std::io::Error>>,
     pub(crate) waker: AtomicWaker,
 }
 
+#[cfg(feature = "stream")]
 impl EventsInnerRead {
     pub(crate) fn new() -> Self {
         Self {
             in_buffer: Mutex::new(Vec::new()),
             stream_error: Mutex::new(None),
-            waker: AtomicWaker::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct EventsInnerWrite {
-    pub(crate) write_error: Mutex<Option<std::io::Error>>,
-    pub(crate) waker: AtomicWaker,
-}
-
-impl EventsInnerWrite {
-    pub(crate) fn new() -> Self {
-        Self {
-            write_error: Mutex::new(None),
             waker: AtomicWaker::new(),
         }
     }
@@ -213,14 +206,18 @@ impl SerialPortStreamBuilder {
     /// Opens the serial port and returns a [`SerialPortStream`].
     ///
     /// Applies line settings, [`dtr_on_open`](Self::dtr_on_open), and optional
-    /// [`clear`](Self::clear) before any background read/write threads are started.
+    /// [`clear`](Self::clear) before async I/O begins.
     pub fn open(self) -> std::io::Result<SerialPortStream> {
+        #[cfg(feature = "stream")]
         let read_inner = Arc::new(EventsInnerRead::new());
-        let write_inner = Arc::new(EventsInnerWrite::new());
         Ok(SerialPortStream {
-            platform: PlatformStream::new(self, read_inner.clone(), write_inner.clone())?,
+            platform: PlatformStream::new(
+                self,
+                #[cfg(feature = "stream")]
+                read_inner.clone(),
+            )?,
+            #[cfg(feature = "stream")]
             read_inner,
-            write_inner,
             flush_task: None,
             write_in_flight: false,
         })
@@ -268,29 +265,38 @@ pub fn new<'a>(
 
 /// An opened serial port for async reads and writes.
 ///
-/// - [`Stream`] / [`AsyncRead`]: shared in-memory receive FIFO (background read thread).
-/// - [`AsyncWrite`]: dedicated background write thread.
+/// # Read behavior
+///
+/// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
+/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a thread-pool completion reactor.
+///
+/// Enable the `stream` feature for [`Stream`] / [`SerialPortStream::try_poll_next`]. That starts a background receive
+/// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
+/// from the same FIFO.
+///
+/// # Write behavior
+///
+/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + thread-pool reactor on Windows).
 ///
 /// # Example
 ///
 /// ```no_run
 /// use serialport_stream::new;
-/// use futures::io::AsyncWriteExt;
-/// use futures::stream::TryStreamExt;
+/// use futures::io::{AsyncReadExt, AsyncWriteExt};
 ///
 /// # async fn example() -> std::io::Result<()> {
 /// let mut stream = new("COM3", 115200).open()?;
 /// stream.write_all(&[0x0a, 0xC0]).await?;
-/// if let Some(bytes) = stream.try_next().await? {
-///     println!("{bytes:?}");
-/// }
+/// let mut buf = [0u8; 256];
+/// let n = stream.read(&mut buf).await?;
+/// # let _ = n;
 /// # Ok(())
 /// # }
 /// ```
 pub struct SerialPortStream {
     platform: PlatformStream,
+    #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
-    write_inner: Arc<EventsInnerWrite>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
     write_in_flight: bool,
 }
@@ -299,8 +305,6 @@ impl std::fmt::Debug for SerialPortStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SerialPortStream")
             .field("platform", &self.platform)
-            .field("read_inner", &self.read_inner)
-            .field("write_inner", &self.write_inner)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
             .field("write_in_flight", &self.write_in_flight)
             .finish()
@@ -308,6 +312,7 @@ impl std::fmt::Debug for SerialPortStream {
 }
 
 impl SerialPortStream {
+    #[cfg(feature = "stream")]
     fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.read_inner.waker.register(cx.waker());
 
@@ -323,24 +328,44 @@ impl SerialPortStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_writer_ready(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
-        self.write_inner.waker.register(cx.waker());
-
-        if let Some(err) = self.write_inner.write_error.lock().unwrap().as_ref() {
-            return Err(clone_io_error(err));
+    #[cfg(feature = "stream")]
+    fn poll_read_fifo(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
+                if buffer.is_empty() {
+                    return Poll::Pending;
+                }
+                let n = buffer.len().min(buf.len());
+                buf[..n].copy_from_slice(&buffer[..n]);
+                buffer.drain(..n);
+                #[cfg(feature = "tracing")]
+                {
+                    if buffer.len() > 0 {
+                        tracing::info!(
+                            cached_bytes = buffer.len(),
+                            "serialport-stream FIFO after AsyncRead read"
+                        );
+                    }
+                }
+                Poll::Ready(Ok(n))
+            }
         }
-
-        if !self.platform.is_write_thread_started() {
-            self.platform.start_write_thread();
-        }
-
-        Ok(())
     }
 
+    #[cfg(feature = "stream")]
     /// Polls for the next received chunk, same as [`Stream::poll_next`].
     ///
-    /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered,
-    /// or `Poll::Pending` if the read thread has not yet delivered data.
+    /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered in the
+    /// receive FIFO, or `Poll::Pending` if the pump thread has not yet delivered data.
+    ///
+    /// Requires the `stream` Cargo feature.
     pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -351,11 +376,9 @@ impl SerialPortStream {
             Poll::Ready(Ok(())) => {
                 let mut buffer = self.read_inner.in_buffer.lock().unwrap();
                 if !buffer.is_empty() {
-                    // Drain all available data
                     let data = buffer.drain(..).collect();
                     return Poll::Ready(Some(Ok(data)));
                 }
-
                 Poll::Pending
             }
         }
@@ -370,7 +393,6 @@ impl SerialPortStream {
 }
 
 unsafe impl Send for SerialPortStream {}
-
 unsafe impl Sync for SerialPortStream {}
 
 impl AsyncRead for SerialPortStream {
@@ -381,31 +403,18 @@ impl AsyncRead for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        match this.poll_receiver_ready(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
-                let mut buffer = this.read_inner.in_buffer.lock().unwrap();
-                if buffer.is_empty() {
-                    return Poll::Pending;
-                }
-                let n = buf.len().min(buffer.len());
-                buf[..n].copy_from_slice(&buffer[..n]);
-                buffer.drain(..n);
-                let cached_bytes = buffer.len();
-                if cached_bytes > 0 {
-                    trace_info!(
-                        read_bytes = n,
-                        cached_bytes,
-                        "serialport-stream receive buffer after AsyncRead read"
-                    );
-                }
-                Poll::Ready(Ok(n))
-            }
+        #[cfg(feature = "stream")]
+        {
+            return this.poll_read_fifo(cx, buf);
+        }
+        #[cfg(not(feature = "stream"))]
+        {
+            this.platform.poll_read(cx, buf)
         }
     }
 }
 
+#[cfg(feature = "stream")]
 impl Stream for SerialPortStream {
     type Item = Result<Vec<u8>, std::io::Error>;
 
@@ -422,23 +431,13 @@ impl AsyncWrite for SerialPortStream {
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
         let this = self.as_mut().get_mut();
-        let result = match this.poll_writer_ready(cx) {
-            Err(e) => Poll::Ready(Err(e)),
-            Ok(()) => this.platform.poll_write(buf),
-        };
-        // A pending write has been started but not yet finished; `poll_flush` waits on this.
+        let result = this.platform.poll_write(cx, buf);
         this.write_in_flight = result.is_pending();
         result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.as_mut().get_mut();
-
-        this.write_inner.waker.register(cx.waker());
-
-        if let Some(err) = this.write_inner.write_error.lock().unwrap().as_ref() {
-            return Poll::Ready(Err(clone_io_error(err)));
-        }
 
         if this.write_in_flight {
             return Poll::Pending;

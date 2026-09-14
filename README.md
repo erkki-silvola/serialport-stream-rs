@@ -8,17 +8,17 @@ Async serial port I/O as [`futures::AsyncRead`](https://docs.rs/futures/latest/f
 
 ```toml
 [dependencies]
-serialport-stream = "0.3"
+serialport-stream = "0.4"
 ```
 
 Optional features:
 
 ```toml
 # Stream / try_next — background receive FIFO pump (Unix and Windows)
-serialport-stream = { version = "0.3", features = ["stream"] }
+serialport-stream = { version = "0.4", features = ["stream"] }
 
 # Diagnostic logs (EAGAIN retries, receive-buffer diagnostics)
-serialport-stream = { version = "0.3", features = ["tracing"] }
+serialport-stream = { version = "0.4", features = ["tracing"] }
 ```
 
 Examples below also use `futures-lite` (blocking) or `tokio`.

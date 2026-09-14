@@ -19,7 +19,7 @@
 //! | Platform | [`AsyncRead`] (no `stream`) | [`AsyncRead`] + [`Stream`] (`stream` feature) |
 //! | --- | --- | --- |
 //! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Shared poll-based background thread → FIFO |
-//! | Windows | Overlapped `ReadFile` + thread-pool reactor | Shared background read thread → FIFO |
+//! | Windows | Overlapped `ReadFile` + windows thread-pool | Shared background read thread → FIFO |
 //!
 //! When `stream` is enabled, [`AsyncRead`] and [`Stream`] share the same background receive FIFO
 //! (Unix and Windows).
@@ -27,7 +27,7 @@
 //! ## Write path
 //!
 //! On Unix, [`AsyncWrite`] uses [`async-io`](https://docs.rs/async-io). On Windows, overlapped
-//! `WriteFile` with a dedicated thread-pool completion reactor.
+//! `WriteFile` with a windows thread-pool completion.
 //!
 //! [`AsyncReadExt`] and [`AsyncWriteExt`] are re-exported from `futures`.
 //!
@@ -268,7 +268,7 @@ pub fn new<'a>(
 /// # Read behavior
 ///
 /// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
-/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a thread-pool completion reactor.
+/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a windows thread-pool completion.
 ///
 /// Enable the `stream` feature for [`Stream`] / [`SerialPortStream::try_poll_next`]. That starts a background receive
 /// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
@@ -276,7 +276,7 @@ pub fn new<'a>(
 ///
 /// # Write behavior
 ///
-/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + thread-pool reactor on Windows).
+/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + windows thread-pool completion).
 ///
 /// # Example
 ///

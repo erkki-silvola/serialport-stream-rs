@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0-beta.1]
+## [0.4.0]
 
 ##### Added
 
@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ##### Changed
 
-* Default [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) polls the port directly (async-io on Unix, overlapped `ReadFile` + thread-pool reactor on Windows) instead of always using a background receive thread.
-* Default [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) uses async-io on Unix and overlapped `WriteFile` + thread-pool reactor on Windows; the dedicated background write thread is removed.
+* Default [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) polls the port directly (async-io on Unix, overlapped `ReadFile` + thread-pool on Windows) instead of always using a background receive thread.
+* Default [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html) uses async-io on Unix and overlapped `WriteFile` + thread-pool  on Windows.
 * Unix adds an `async-io` dependency for default read/write paths.
 
 ## [0.3.2] - 2026-07-06

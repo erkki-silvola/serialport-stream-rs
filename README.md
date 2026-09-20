@@ -17,7 +17,7 @@ Optional features:
 # Stream / try_next — background receive FIFO pump (Unix and Windows)
 serialport-stream = { version = "0.4", features = ["stream"] }
 
-# Diagnostic logs (EAGAIN retries, receive-buffer diagnostics)
+# Diagnostic logs
 serialport-stream = { version = "0.4", features = ["tracing"] }
 ```
 
@@ -49,8 +49,6 @@ There is no backpressure on FIFO paths; the buffer can grow without bound.
 ## Usage
 
 ### AsyncRead (default)
-
-Works without extra features. Preferred path on both platforms.
 
 ```rust
 use serialport_stream::{new, AsyncReadExt};

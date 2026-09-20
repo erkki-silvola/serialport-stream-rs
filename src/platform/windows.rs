@@ -656,9 +656,9 @@ fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
 }
 
 fn cancel_overlapped(handle: HANDLE, overlapped: *mut OVERLAPPED) {
-    let _c = unsafe { CancelIoEx(handle, overlapped) };
+    let _ = unsafe { CancelIoEx(handle, overlapped) };
     let mut transferred = 0;
-    let _g = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, TRUE) };
+    let _ = unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, TRUE) };
 }
 
 impl Drop for PlatformStream {

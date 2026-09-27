@@ -58,3 +58,6 @@ required-features = ["stream"]
 
 [[example]]
 name = "tokio_async_rw"
+
+[[example]]
+name = "tokio_split_rw"

@@ -56,7 +56,7 @@ mod types;
 pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
-use crate::platform::PlatformStream;
+use crate::platform::{PlatformReadHalf, PlatformStream, PlatformWriteHalf};
 #[cfg(feature = "stream")]
 use futures::task::AtomicWaker;
 
@@ -390,6 +390,227 @@ impl SerialPortStream {
     pub fn set_baudrate(&mut self, baud_rate: u32) -> std::io::Result<()> {
         self.platform.set_baud_rate(baud_rate)
     }
+
+    /// Splits this port into independently usable read and write halves.
+    ///
+    /// Each half implements the appropriate async I/O trait and can be moved to a
+    /// separate task or OS thread for concurrent read/write use. Do not use multiple
+    /// readers or multiple writers on the same port.
+    ///
+    /// After splitting, [`set_baudrate`](Self::set_baudrate) is available on
+    /// [`SerialPortWriter`] only.
+    pub fn split(self) -> (SerialPortReader, SerialPortWriter) {
+        let Self {
+            platform,
+            #[cfg(feature = "stream")]
+            read_inner,
+            flush_task,
+            write_in_flight,
+        } = self;
+        let (platform_read, platform_write) = platform.split();
+        (
+            SerialPortReader {
+                platform: platform_read,
+                #[cfg(feature = "stream")]
+                read_inner,
+            },
+            SerialPortWriter {
+                platform: platform_write,
+                flush_task,
+                write_in_flight,
+            },
+        )
+    }
+}
+
+/// Read half of a split serial port.
+///
+/// Created by [`SerialPortStream::split`]. Implements [`AsyncRead`], and with the
+/// `stream` feature also [`Stream`] and [`SerialPortReader::try_poll_next`].
+pub struct SerialPortReader {
+    platform: PlatformReadHalf,
+    #[cfg(feature = "stream")]
+    read_inner: Arc<EventsInnerRead>,
+}
+
+impl std::fmt::Debug for SerialPortReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialPortReader")
+            .field("platform", &self.platform)
+            .finish()
+    }
+}
+
+impl SerialPortReader {
+    #[cfg(feature = "stream")]
+    fn poll_receiver_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.read_inner.waker.register(cx.waker());
+
+        if let Some(err) = self.read_inner.stream_error.lock().unwrap().as_ref() {
+            return Poll::Ready(Err(clone_io_error(err)));
+        }
+
+        if !self.platform.is_read_thread_started() {
+            self.platform.start_read_thread();
+            return Poll::Pending;
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    #[cfg(feature = "stream")]
+    fn poll_read_fifo(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
+                if buffer.is_empty() {
+                    return Poll::Pending;
+                }
+                let n = buffer.len().min(buf.len());
+                buf[..n].copy_from_slice(&buffer[..n]);
+                buffer.drain(..n);
+                #[cfg(feature = "tracing")]
+                {
+                    if buffer.len() > 0 {
+                        tracing::info!(
+                            cached_bytes = buffer.len(),
+                            "serialport-stream FIFO after AsyncRead read"
+                        );
+                    }
+                }
+                Poll::Ready(Ok(n))
+            }
+        }
+    }
+
+    #[cfg(feature = "stream")]
+    /// Polls for the next received chunk, same as [`Stream::poll_next`].
+    ///
+    /// Requires the `stream` Cargo feature.
+    pub fn try_poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Vec<u8>, std::io::Error>>> {
+        match self.poll_receiver_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Ok(())) => {
+                let mut buffer = self.read_inner.in_buffer.lock().unwrap();
+                if !buffer.is_empty() {
+                    let data = buffer.drain(..).collect();
+                    return Poll::Ready(Some(Ok(data)));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+unsafe impl Send for SerialPortReader {}
+unsafe impl Sync for SerialPortReader {}
+
+impl AsyncRead for SerialPortReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        assert!(!buf.is_empty());
+        let this = self.as_mut().get_mut();
+        #[cfg(feature = "stream")]
+        {
+            this.poll_read_fifo(cx, buf)
+        }
+        #[cfg(not(feature = "stream"))]
+        {
+            this.platform.poll_read(cx, buf)
+        }
+    }
+}
+
+#[cfg(feature = "stream")]
+impl Stream for SerialPortReader {
+    type Item = Result<Vec<u8>, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.try_poll_next(cx)
+    }
+}
+
+/// Write half of a split serial port.
+///
+/// Created by [`SerialPortStream::split`]. Implements [`AsyncWrite`].
+pub struct SerialPortWriter {
+    platform: PlatformWriteHalf,
+    flush_task: Option<blocking::Task<std::io::Result<()>>>,
+    write_in_flight: bool,
+}
+
+impl std::fmt::Debug for SerialPortWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialPortWriter")
+            .field("platform", &self.platform)
+            .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
+            .field("write_in_flight", &self.write_in_flight)
+            .finish()
+    }
+}
+
+impl SerialPortWriter {
+    /// Sets the baud rate (bits per second) on an already-open port.
+    ///
+    /// Other line settings (data bits, parity, stop bits, flow control) remain unchanged.
+    pub fn set_baudrate(&mut self, baud_rate: u32) -> std::io::Result<()> {
+        self.platform.set_baud_rate(baud_rate)
+    }
+}
+
+unsafe impl Send for SerialPortWriter {}
+unsafe impl Sync for SerialPortWriter {}
+
+impl AsyncWrite for SerialPortWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        assert!(!buf.is_empty());
+        let this = self.as_mut().get_mut();
+        let result = this.platform.poll_write(cx, buf);
+        this.write_in_flight = result.is_pending();
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.as_mut().get_mut();
+
+        if this.write_in_flight {
+            return Poll::Pending;
+        }
+
+        if this.flush_task.is_none() {
+            this.flush_task = Some(this.platform.flush_tx_unblocked());
+        }
+
+        let task = this.flush_task.as_mut().expect("flush task");
+        match Pin::new(task).poll(cx) {
+            Poll::Ready(result) => {
+                this.flush_task = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_flush(cx)
+    }
 }
 
 unsafe impl Send for SerialPortStream {}
@@ -405,7 +626,7 @@ impl AsyncRead for SerialPortStream {
         let this = self.as_mut().get_mut();
         #[cfg(feature = "stream")]
         {
-            return this.poll_read_fifo(cx, buf);
+            this.poll_read_fifo(cx, buf)
         }
         #[cfg(not(feature = "stream"))]
         {

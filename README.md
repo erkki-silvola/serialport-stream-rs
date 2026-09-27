@@ -133,6 +133,47 @@ Read + write example (`AsyncRead` + `AsyncWrite`, no extra features): `cargo run
 
 For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) as above.
 
+### Split read/write (concurrent)
+
+Call [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) to get owned [`SerialPortReader`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortReader.html) and [`SerialPortWriter`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortWriter.html) halves. Each half can be moved to a separate task or OS thread for concurrent async read and write.
+
+```rust
+use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let stream = new("/dev/ttyUSB0", 115200).open()?;
+    let (mut reader, mut writer) = stream.split();
+
+    let read_task = tokio::spawn(async move {
+        let mut buf = [0u8; 256];
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                continue;
+            }
+            println!("read {n} bytes");
+        }
+    });
+
+    let write_task = tokio::spawn(async move {
+        writer.write_all(b"PING\r\n").await?;
+        writer.flush().await?;
+        Ok::<(), std::io::Error>(())
+    });
+
+    let (_, write_result) = tokio::join!(read_task, write_task);
+    write_result??;
+    Ok(())
+}
+```
+
+Example: `cargo run --example tokio_split_rw -- /dev/ttyUSB0 115200`
+
+- Use one reader and one writer per port; do not split twice or share a half across multiple concurrent readers/writers.
+- After splitting, [`set_baudrate`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortWriter.html#method.set_baudrate) is on `SerialPortWriter` only.
+- With the `stream` feature, [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) / `try_poll_next` are on `SerialPortReader` only.
+
 ## Builder
 
 Open with [`new(path, baud_rate)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), then chain options and call `.open()`:

@@ -85,7 +85,7 @@ struct UnixInner {
 }
 
 #[derive(Debug)]
-pub struct PlatformReadHalf {
+pub struct PlatformRead {
     #[cfg(not(feature = "stream"))]
     read_async: Async<SerialRead>,
     #[cfg(feature = "stream")]
@@ -99,18 +99,28 @@ pub struct PlatformReadHalf {
 }
 
 #[derive(Debug)]
-pub struct PlatformWriteHalf {
+pub struct PlatformWrite {
     write_async: Async<SerialWrite>,
     flush_fd: OwnedFd,
 }
 
 #[derive(Debug)]
-pub struct PlatformStream {
-    read: PlatformReadHalf,
-    write: PlatformWriteHalf,
+pub struct PlatformSettings(OwnedFd);
+
+impl PlatformSettings {
+    pub fn set_baud_rate(&self, baud_rate: u32) -> std::io::Result<()> {
+        serial::set_baud_rate(self.0.as_raw_fd(), baud_rate)
+    }
 }
 
-impl Drop for PlatformReadHalf {
+#[derive(Debug)]
+pub struct PlatformStream {
+    read: PlatformRead,
+    write: PlatformWrite,
+    settings: PlatformSettings,
+}
+
+impl Drop for PlatformRead {
     fn drop(&mut self) {
         #[cfg(feature = "stream")]
         {
@@ -132,7 +142,7 @@ impl Drop for PlatformReadHalf {
     }
 }
 
-impl Drop for PlatformWriteHalf {
+impl Drop for PlatformWrite {
     fn drop(&mut self) {
         let _ = serial::clear(self.flush_fd.as_raw_fd(), crate::ClearBuffer::Output);
     }
@@ -152,6 +162,7 @@ impl PlatformStream {
         let read_fd = nix::unistd::dup(port_fd)?;
         let write_fd = nix::unistd::dup(port_fd)?;
         let flush_fd = nix::unistd::dup(port_fd)?;
+        let settings_fd = nix::unistd::dup(port_fd)?;
         #[cfg(not(feature = "stream"))]
         let read_async = Async::new_nonblocking(SerialRead(read_fd))?;
         #[cfg(feature = "stream")]
@@ -163,7 +174,7 @@ impl PlatformStream {
         let cancel_pipe = nix::unistd::pipe().unwrap();
 
         Ok(Self {
-            read: PlatformReadHalf {
+            read: PlatformRead {
                 #[cfg(not(feature = "stream"))]
                 read_async,
                 #[cfg(feature = "stream")]
@@ -175,15 +186,16 @@ impl PlatformStream {
                 #[cfg(feature = "stream")]
                 read_fd: stream_read_fd,
             },
-            write: PlatformWriteHalf {
+            write: PlatformWrite {
                 write_async,
                 flush_fd,
             },
+            settings: PlatformSettings(settings_fd),
         })
     }
 
     pub fn set_baud_rate(&self, baud_rate: u32) -> std::io::Result<()> {
-        self.write.set_baud_rate(baud_rate)
+        self.settings.set_baud_rate(baud_rate)
     }
 
     pub fn flush_tx_unblocked(&self) -> blocking::Task<std::io::Result<()>> {
@@ -213,12 +225,12 @@ impl PlatformStream {
         self.write.poll_write(cx, buf)
     }
 
-    pub fn split(self) -> (PlatformReadHalf, PlatformWriteHalf) {
-        (self.read, self.write)
+    pub fn split(self) -> (PlatformRead, PlatformWrite, PlatformSettings) {
+        (self.read, self.write, self.settings)
     }
 }
 
-impl PlatformReadHalf {
+impl PlatformRead {
     #[cfg(not(feature = "stream"))]
     pub fn poll_read(
         &mut self,
@@ -330,11 +342,7 @@ impl PlatformReadHalf {
     }
 }
 
-impl PlatformWriteHalf {
-    pub fn set_baud_rate(&self, baud_rate: u32) -> std::io::Result<()> {
-        serial::set_baud_rate(self.write_async.get_ref().0.as_raw_fd(), baud_rate)
-    }
-
+impl PlatformWrite {
     pub fn flush_tx_unblocked(&self) -> blocking::Task<std::io::Result<()>> {
         let fd = self.flush_fd.as_raw_fd();
         blocking::unblock(move || serial::flush_output(fd))
@@ -345,7 +353,7 @@ impl PlatformWriteHalf {
     }
 }
 
-unsafe impl Send for PlatformReadHalf {}
-unsafe impl Sync for PlatformReadHalf {}
-unsafe impl Send for PlatformWriteHalf {}
-unsafe impl Sync for PlatformWriteHalf {}
+unsafe impl Send for PlatformRead {}
+unsafe impl Sync for PlatformRead {}
+unsafe impl Send for PlatformWrite {}
+unsafe impl Sync for PlatformWrite {}

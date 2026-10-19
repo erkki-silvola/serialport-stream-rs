@@ -1,5 +1,4 @@
 use std::io;
-#[cfg(feature = "stream")]
 use std::mem::MaybeUninit;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
@@ -194,7 +193,7 @@ fn duplicate_handle(source: HANDLE) -> io::Result<HandleWrapper> {
 }
 
 #[derive(Debug)]
-pub struct PlatformReadHalf {
+pub struct PlatformRead {
     #[cfg(feature = "stream")]
     read_thread_handle: Option<std::thread::JoinHandle<()>>,
     #[cfg(feature = "stream")]
@@ -207,18 +206,28 @@ pub struct PlatformReadHalf {
 }
 
 #[derive(Debug)]
-pub struct PlatformWriteHalf {
+pub struct PlatformWrite {
     write_shared: Arc<WriteShared>,
     write_port: HandleWrapper,
 }
 
-#[derive(Debug)]
-pub struct PlatformStream {
-    read: PlatformReadHalf,
-    write: PlatformWriteHalf,
+#[derive(Debug, Clone)]
+pub struct PlatformSettings(HandleWrapper);
+
+impl PlatformSettings {
+    pub fn set_baud_rate(&self, baud_rate: u32) -> io::Result<()> {
+        comm::set_baud_rate(self.0.raw(), baud_rate)
+    }
 }
 
-impl Drop for PlatformReadHalf {
+#[derive(Debug)]
+pub struct PlatformStream {
+    read: PlatformRead,
+    write: PlatformWrite,
+    settings: PlatformSettings,
+}
+
+impl Drop for PlatformRead {
     fn drop(&mut self) {
         #[cfg(feature = "stream")]
         if let Some(handle) = self.read_thread_handle.take() {
@@ -238,7 +247,7 @@ impl Drop for PlatformReadHalf {
     }
 }
 
-impl Drop for PlatformWriteHalf {
+impl Drop for PlatformWrite {
     fn drop(&mut self) {
         self.write_shared.wait.clear();
         if let IoState::InFlight(op) = &mut *self.write_shared.state.lock().unwrap() {
@@ -317,10 +326,11 @@ impl PlatformStream {
 
         let read_port = duplicate_handle(port.raw())?;
         let write_port = duplicate_handle(port.raw())?;
+        let settings_port = duplicate_handle(port.raw())?;
         drop(port);
 
         Ok(Self {
-            read: PlatformReadHalf {
+            read: PlatformRead {
                 #[cfg(feature = "stream")]
                 read_thread_handle: None,
                 #[cfg(feature = "stream")]
@@ -334,13 +344,14 @@ impl PlatformStream {
                 }),
                 read_port,
             },
-            write: PlatformWriteHalf {
+            write: PlatformWrite {
                 write_shared: Arc::new(WriteShared {
                     state: Mutex::new(IoState::Idle),
                     wait: OverlappedWait::new(),
                 }),
                 write_port,
             },
+            settings: PlatformSettings(settings_port),
         })
     }
 
@@ -364,19 +375,19 @@ impl PlatformStream {
     }
 
     pub fn set_baud_rate(&self, baud_rate: u32) -> io::Result<()> {
-        self.write.set_baud_rate(baud_rate)
+        self.settings.set_baud_rate(baud_rate)
     }
 
     pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         self.write.flush_tx_unblocked()
     }
 
-    pub fn split(self) -> (PlatformReadHalf, PlatformWriteHalf) {
-        (self.read, self.write)
+    pub fn split(self) -> (PlatformRead, PlatformWrite, PlatformSettings) {
+        (self.read, self.write, self.settings)
     }
 }
 
-impl PlatformReadHalf {
+impl PlatformRead {
     #[cfg(not(feature = "stream"))]
     pub fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         let handle = self.read_port.raw();
@@ -435,6 +446,14 @@ impl PlatformReadHalf {
                 Poll::Ready(Ok(bytes)) => {
                     shared.wait.clear();
                     let n = bytes as usize;
+                    if n == 0 {
+                        // on windows it is difficult to avoid 0 read and read any combo with COMMTIMEOUT settings
+                        // Typically the first read for some reason is 0, so wake up the runtime immediatly to poll again in
+                        // idle state
+                        *state = ReadIoState::Idle;
+                        cx.waker().clone().wake();
+                        return Poll::Pending;
+                    }
                     buf[..n].copy_from_slice(&buffer[..n]);
                     *state = ReadIoState::Idle;
                     Poll::Ready(Ok(n))
@@ -610,7 +629,7 @@ impl PlatformReadHalf {
     }
 }
 
-impl PlatformWriteHalf {
+impl PlatformWrite {
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let handle = self.write_port.raw();
         let shared = &self.write_shared;
@@ -674,20 +693,16 @@ impl PlatformWriteHalf {
         }
     }
 
-    pub fn set_baud_rate(&self, baud_rate: u32) -> io::Result<()> {
-        comm::set_baud_rate(self.write_port.raw(), baud_rate)
-    }
-
     pub fn flush_tx_unblocked(&self) -> blocking::Task<io::Result<()>> {
         let port = self.write_port.clone();
         blocking::unblock(move || comm::flush_output(port))
     }
 }
 
-unsafe impl Send for PlatformReadHalf {}
-unsafe impl Sync for PlatformReadHalf {}
-unsafe impl Send for PlatformWriteHalf {}
-unsafe impl Sync for PlatformWriteHalf {}
+unsafe impl Send for PlatformRead {}
+unsafe impl Sync for PlatformRead {}
+unsafe impl Send for PlatformWrite {}
+unsafe impl Sync for PlatformWrite {}
 
 unsafe extern "system" fn overlapped_wait_callback(
     context: *mut std::ffi::c_void,

@@ -7,7 +7,7 @@ pub mod unix;
 pub mod windows;
 
 #[cfg(unix)]
-pub use unix::{PlatformReadHalf, PlatformStream, PlatformWriteHalf};
+pub use unix::{PlatformRead, PlatformSettings, PlatformStream, PlatformWrite};
 
 #[cfg(windows)]
-pub use windows::{PlatformReadHalf, PlatformStream, PlatformWriteHalf};
+pub use windows::{PlatformRead, PlatformSettings, PlatformStream, PlatformWrite};

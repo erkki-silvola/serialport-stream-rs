@@ -56,7 +56,7 @@ mod types;
 pub mod line_settings;
 pub use types::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
 
-use crate::platform::{PlatformReadHalf, PlatformStream, PlatformWriteHalf};
+use crate::platform::{PlatformRead, PlatformSettings, PlatformStream, PlatformWrite};
 #[cfg(feature = "stream")]
 use futures::task::AtomicWaker;
 
@@ -407,7 +407,7 @@ impl SerialPortStream {
             flush_task,
             write_in_flight,
         } = self;
-        let (platform_read, platform_write) = platform.split();
+        let (platform_read, platform_write, settings) = platform.split();
         (
             SerialPortReader {
                 platform: platform_read,
@@ -416,6 +416,7 @@ impl SerialPortStream {
             },
             SerialPortWriter {
                 platform: platform_write,
+                settings,
                 flush_task,
                 write_in_flight,
             },
@@ -428,7 +429,7 @@ impl SerialPortStream {
 /// Created by [`SerialPortStream::split`]. Implements [`AsyncRead`], and with the
 /// `stream` feature also [`Stream`] and [`SerialPortReader::try_poll_next`].
 pub struct SerialPortReader {
-    platform: PlatformReadHalf,
+    platform: PlatformRead,
     #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
 }
@@ -547,7 +548,8 @@ impl Stream for SerialPortReader {
 ///
 /// Created by [`SerialPortStream::split`]. Implements [`AsyncWrite`].
 pub struct SerialPortWriter {
-    platform: PlatformWriteHalf,
+    platform: PlatformWrite,
+    settings: PlatformSettings,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
     write_in_flight: bool,
 }
@@ -567,7 +569,7 @@ impl SerialPortWriter {
     ///
     /// Other line settings (data bits, parity, stop bits, flow control) remain unchanged.
     pub fn set_baudrate(&mut self, baud_rate: u32) -> std::io::Result<()> {
-        self.platform.set_baud_rate(baud_rate)
+        self.settings.set_baud_rate(baud_rate)
     }
 }
 

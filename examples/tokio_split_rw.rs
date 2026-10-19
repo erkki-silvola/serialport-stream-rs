@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
                 eprintln!("flush error: {e}");
                 break;
             }
+            println!("Written and flushed");
         }
     });
 

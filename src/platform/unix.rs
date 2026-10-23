@@ -36,6 +36,10 @@ struct SerialRead(OwnedFd);
 impl Read for SerialRead {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match nix::unistd::read(self.0.as_fd(), buf) {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "device disconnected",
+            )),
             Ok(n) => Ok(n),
             Err(Errno::EAGAIN) => Err(io::ErrorKind::WouldBlock.into()),
             Err(e) => Err(e.into()),

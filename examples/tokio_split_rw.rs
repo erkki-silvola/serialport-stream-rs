@@ -10,7 +10,6 @@ use anyhow::Result;
 use clap::{Arg, Command};
 use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
 use tokio::signal::ctrl_c;
-use tokio::sync::mpsc;
 
 const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
 

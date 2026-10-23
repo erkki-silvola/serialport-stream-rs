@@ -5,11 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-23
 
 ##### Added
 
-* split support
+* [`SerialPortStream::split`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) returning owned [`SerialPortReader`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortReader.html) and [`SerialPortWriter`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortWriter.html) for concurrent async read and write; example `tokio_split_rw`.
+
+##### Fixed
+
+* Linux default (non-`stream`) [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html): `read(2)` returning 0 is reported as disconnect instead of a successful zero-byte read.
 
 ## [0.4.0] - 2026-09-14
 

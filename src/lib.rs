@@ -397,8 +397,6 @@ impl SerialPortStream {
     /// separate task or OS thread for concurrent read/write use. Do not use multiple
     /// readers or multiple writers on the same port.
     ///
-    /// After splitting, [`set_baudrate`](Self::set_baudrate) is available on
-    /// [`SerialPortWriter`] only.
     pub fn split(self) -> (SerialPortReader, SerialPortWriter) {
         let Self {
             platform,

@@ -274,7 +274,7 @@ fn set_baud_rate_in_termios(termios: &mut Termios, baud_rate: u32) -> io::Result
         termios.c_cflag |= libc::BOTHER;
         termios.c_ispeed = baud_rate;
         termios.c_ospeed = baud_rate;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(any(

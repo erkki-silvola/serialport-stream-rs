@@ -1,5 +1,4 @@
 use std::io;
-use std::mem::MaybeUninit;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};

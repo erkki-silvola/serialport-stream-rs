@@ -11,11 +11,11 @@
 
 use anyhow::Result;
 use clap::{Arg, Command};
-use serialport_stream::{new, AsyncWriteExt};
 #[cfg(not(feature = "stream"))]
 use serialport_stream::AsyncReadExt;
 #[cfg(feature = "stream")]
 use serialport_stream::TryStreamExt;
+use serialport_stream::{new, AsyncWriteExt};
 use tokio::signal::ctrl_c;
 
 const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];

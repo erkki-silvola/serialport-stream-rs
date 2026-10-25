@@ -272,7 +272,7 @@ impl SerialPortStream {
                 buffer.drain(..n);
                 #[cfg(feature = "tracing")]
                 {
-                    if buffer.len() > 0 {
+                    if !buffer.is_empty() {
                         tracing::info!(
                             cached_bytes = buffer.len(),
                             "serialport-stream FIFO after AsyncRead read"
@@ -396,7 +396,7 @@ impl SerialPortReader {
                 buffer.drain(..n);
                 #[cfg(feature = "tracing")]
                 {
-                    if buffer.len() > 0 {
+                    if !buffer.is_empty() {
                         tracing::info!(
                             cached_bytes = buffer.len(),
                             "serialport-stream FIFO after AsyncRead read"

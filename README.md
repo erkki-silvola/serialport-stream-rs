@@ -1,61 +1,48 @@
-# serialport-stream-rs
+# serialport-stream
 
-Async serial port I/O as [`futures::AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) and [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html), with optional [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) support. Uses POSIX termios on Unix and Win32 COMM APIs on Windows.
-
-**Async runtime agnostic** — implements [`futures`](https://docs.rs/futures) traits only; no Tokio/async-std dependency. Works with any executor that polls those futures (Tokio, async-std, `futures_lite::future::block_on`, etc.).
+Async serial I/O as [`futures::AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) / [`AsyncWrite`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html), with optional [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html). Unix uses termios + async-io; Windows uses overlapped COMM I/O. No Tokio/async-std dependency — any executor that polls `futures` traits works.
 
 ## Installation
 
 ```toml
-[dependencies]
-serialport-stream = "0.4"
+serialport-stream = "0.5"
+# optional: features = ["stream"] or ["tracing"]
 ```
 
-Optional features:
+| Feature | Purpose |
+| --- | --- |
+| `stream` | Background receive FIFO; [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) / `try_next` |
+| `tracing` | Diagnostic logs |
 
-```toml
-# Stream / try_next — background receive FIFO pump (Unix and Windows)
-serialport-stream = { version = "0.4", features = ["stream"] }
+## Read paths
 
-# Diagnostic logs
-serialport-stream = { version = "0.4", features = ["tracing"] }
-```
+**Default (no `stream`):** [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) polls the open port directly. Each read returns up to your buffer length; leftover bytes stay in the OS/driver buffer until the next read. Writes always use direct async I/O (async-io on Unix, overlapped COMM on Windows).
 
-Examples below also use `futures-lite` (blocking) or `tokio`.
+**With `stream`:** A platform background thread continuously reads the port into an in-memory **FIFO**. Your task consumes from that buffer instead of polling the device:
 
-## Read behavior
+| API | Each ready poll / await returns |
+| --- | --- |
+| [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) / `try_next` | Every byte currently in the FIFO (buffer drained) |
+| [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html) | Up to your buffer length; remainder stays in the FIFO |
 
-| Platform | `AsyncRead` | `Stream` / `try_next` (`stream` feature) |
+Use **one** read style per port — do not mix `Stream` / `try_next` and `AsyncRead`, or data can be split unpredictably across calls.
+
+The FIFO has **no backpressure**: if the app reads slower than the device sends, memory use can grow without bound.
+
+| Platform | Direct `AsyncRead` | Background pump (`stream`) |
 | --- | --- | --- |
-| **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port | Poll-based background read thread → FIFO |
-| **Windows** | Overlapped `ReadFile` + windows thread-pool | `WaitCommEvent` background read thread → FIFO |
+| Unix | async-io poll on the fd | Poll-based read thread → FIFO |
+| Windows | Overlapped `ReadFile` + thread pool | `WaitCommEvent` read thread → FIFO |
 
-With the `stream` feature, `AsyncRead` also reads from the FIFO. Do not mix `Stream` / `try_next` and `AsyncRead` on the same port — that can split messages across calls.
-
-| API | Each call returns |
-| --- | --- |
-| `Stream` / `try_next` | All bytes in the FIFO (buffer drained) |
-| `AsyncRead` | Up to your buffer length; remainder stays in the FIFO |
-
-There is no backpressure on FIFO paths; the buffer can grow without bound.
-
-## Write behavior
-
-| Platform | `AsyncWrite` |
-| --- | --- |
-| **Unix** | Direct [`async-io`](https://docs.rs/async-io) poll on the port |
-| **Windows** | Overlapped `WriteFile` + windows thread-pool |
-
-## Usage
-
-### AsyncRead (default)
+## Quick start
 
 ```rust
-use serialport_stream::{new, AsyncReadExt};
+use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let mut port = new("/dev/ttyUSB0", 115200).open()?;
+    port.write_all(b"PING\r\n").await?;
     let mut buf = [0u8; 256];
     let n = port.read(&mut buf).await?;
     println!("read {n} bytes");
@@ -63,43 +50,28 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Example: `cargo run --example tokio_async_read -- /dev/ttyUSB0 115200`
+Open with [`new(path, baud)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), chain `.data_bits`, `.parity`, `.stop_bits`, `.flow_control`, `.dtr_on_open`, `.clear`, then `.open()`. Use [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) for concurrent read/write tasks.
 
-Add `--features tracing` and pass `--trace` in examples that support it for diagnostic logs.
+For native `tokio::io` traits, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html).
 
-For `tokio::io::AsyncRead`, bridge with [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) (`tokio-util` feature `compat`).
+## Stream (`stream` feature)
 
-### Stream (`stream` feature)
+Enable in `Cargo.toml`:
 
-Requires `features = ["stream"]`.
-
-**Blocking** (`futures_lite::stream::block_on`):
-
-```rust
-use serialport_stream::new;
-use futures_lite::stream;
-
-fn main() -> std::io::Result<()> {
-    let stream = new("COM3", 115200).dtr_on_open(true).open()?;
-
-    for chunk in stream::block_on(stream) {
-        println!("{:?}", chunk?);
-    }
-
-    Ok(())
-}
+```toml
+serialport-stream = { version = "0.5", features = ["stream"] }
 ```
 
-Example: `cargo run --example read_stream --features stream -- COM3 115200`
+See [Read paths](#read-paths) for FIFO semantics. Example:
 
-**Tokio**:
+**Tokio:**
 
 ```rust
 use serialport_stream::{new, TryStreamExt};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut stream = new("/dev/ttyUSB0", 9600).open()?;
+    let mut stream = new("/dev/ttyUSB0", 115200).dtr_on_open(true).open()?;
 
     while let Some(bytes) = stream.try_next().await? {
         println!("Received: {bytes:?}");
@@ -109,92 +81,42 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Example: `cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB0 115200`
-
-### Writing
-
-[`AsyncWriteExt`](https://docs.rs/futures/latest/futures/io/trait.AsyncWriteExt.html) is re-exported. On Unix, writes use async-io; on Windows, overlapped `WriteFile` with a windows thread-pool completion.
+**Blocking** (`futures-lite`):
 
 ```rust
-use serialport_stream::{new, AsyncWriteExt};
+use serialport_stream::new;
+use futures_lite::stream;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let mut port = new("/dev/ttyUSB0", 115200).open()?;
-    port.write_all(b"PING\r\n").await?;
-    port.flush().await?;
+fn main() -> std::io::Result<()> {
+    let stream = new("COM3", 115200).open()?;
+
+    for chunk in stream::block_on(stream) {
+        println!("{:?}", chunk?);
+    }
+
     Ok(())
 }
 ```
 
-Read + write example (`AsyncRead` + `AsyncWrite`, no extra features): `cargo run --example tokio_async_rw -- /dev/ttyUSB0 115200`
+## Examples
 
-For `tokio::io::AsyncWrite`, use [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html) as above.
+| Example | Features |
+| --- | --- |
+| `tokio_async_read` | default |
+| `tokio_async_rw` | default |
+| `tokio_split_rw` | default |
+| `read_stream` | `stream` |
+| `tokio_read_stream` | `stream` |
 
-### Split read/write (concurrent)
-
-Call [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) to get owned [`SerialPortReader`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortReader.html) and [`SerialPortWriter`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortWriter.html) halves. Each half can be moved to a separate task or OS thread for concurrent async read and write.
-
-```rust
-use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
-
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let stream = new("/dev/ttyUSB0", 115200).open()?;
-    let (mut reader, mut writer) = stream.split();
-
-    let read_task = tokio::spawn(async move {
-        let mut buf = [0u8; 256];
-        loop {
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                continue;
-            }
-            println!("read {n} bytes");
-        }
-    });
-
-    let write_task = tokio::spawn(async move {
-        writer.write_all(b"PING\r\n").await?;
-        writer.flush().await?;
-        Ok::<(), std::io::Error>(())
-    });
-
-    let (_, write_result) = tokio::join!(read_task, write_task);
-    write_result??;
-    Ok(())
-}
+```bash
+cargo run --example tokio_async_read -- /dev/ttyUSB0 115200
+cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB0 115200
 ```
 
-Example: `cargo run --example tokio_split_rw -- /dev/ttyUSB0 115200`
-
-- Use one reader and one writer per port; do not split twice or share a half across multiple concurrent readers/writers.
-- After splitting, [`set_baudrate`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortWriter.html#method.set_baudrate) is on `SerialPortWriter` only.
-- With the `stream` feature, [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) / `try_poll_next` are on `SerialPortReader` only.
-
-## Builder
-
-Open with [`new(path, baud_rate)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), then chain options and call `.open()`:
-
-- `.data_bits`, `.parity`, `.stop_bits`, `.flow_control` — default is 8N1, no flow control
-- `.dtr_on_open(bool)` — drive DTR on open
-- `.clear(ClearBuffer::Input | Output | All)` — purge driver buffers at open
-
-Types `DataBits`, `Parity`, `StopBits`, `FlowControl`, and `ClearBuffer` are exported from `serialport_stream`.
-
-## Acknowledgements
-
-Some of the platform I/O code is inspired by [serialport-rs](https://github.com/serialport/serialport-rs).
+Several examples accept `--trace` when built with `--features tracing`.
 
 ## License
 
-This project is licensed under either of:
+Dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+Platform I/O is partly inspired by [serialport-rs](https://github.com/serialport/serialport-rs).

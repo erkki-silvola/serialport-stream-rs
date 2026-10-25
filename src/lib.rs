@@ -1,45 +1,43 @@
-//! Async serial port I/O as [`AsyncRead`] and [`AsyncWrite`], with optional [`Stream`] support.
+//! Async serial I/O as [`AsyncRead`] / [`AsyncWrite`], optional [`Stream`] (`stream` feature).
 //!
-//! Async runtime agnostic: this crate implements [`futures`] traits only and does not depend on
-//! Tokio, async-std, or any other executor. Use it with any runtime that polls those futures
-//! (Tokio, async-std, [`futures_lite::future::block_on`](https://docs.rs/futures-lite/latest/futures_lite/future/fn.block_on.html), etc.).
-//!
-//! Configure and open ports with [`new`] → [`SerialPortStreamBuilder`] → [`.open()`](SerialPortStreamBuilder::open).
-//! Line settings, DTR, and buffer clearing are applied at open time.
-//!
-//! ## Features
-//!
-//! - **`stream`** (optional): [`Stream`], [`TryStreamExt`], and [`SerialPortStream::try_poll_next`]. Starts a
-//!   background receive pump into an in-memory FIFO (poll-based thread on Unix, `WaitCommEvent`
-//!   thread on Windows). With `stream` enabled, [`AsyncRead`] and [`Stream`] share that FIFO.
-//! - **`tracing`** (optional): diagnostic logs.
+//! [`futures`] traits only — no async runtime dependency. Open via [`new`] → builder → `.open()`.
 //!
 //! ## Read paths
 //!
-//! | Platform | [`AsyncRead`] (no `stream`) | [`AsyncRead`] + [`Stream`] (`stream` feature) |
+//! **Without `stream`:** [`AsyncRead`] polls the port directly; each read returns up to the caller's
+//! buffer size.
+//!
+//! **With `stream`:** a background thread pumps received bytes into a FIFO. [`Stream`] / `try_next`
+//! drain the whole FIFO per item; [`AsyncRead`] reads up to the buffer and leaves the rest. Pick one
+//! read API per port — mixing them splits data across calls. The FIFO has no backpressure.
+//!
+//! | Platform | Direct read | `stream` pump |
 //! | --- | --- | --- |
-//! | Unix | Direct [`async-io`](https://docs.rs/async-io) poll on the port fd | Shared poll-based background thread → FIFO |
-//! | Windows | Overlapped `ReadFile` + windows thread-pool | Shared background read thread → FIFO |
-//!
-//! When `stream` is enabled, [`AsyncRead`] and [`Stream`] share the same background receive FIFO
-//! (Unix and Windows).
-//!
-//! ## Write path
-//!
-//! On Unix, [`AsyncWrite`] uses [`async-io`](https://docs.rs/async-io). On Windows, overlapped
-//! `WriteFile` with a windows thread-pool completion.
-//!
-//! [`AsyncReadExt`] and [`AsyncWriteExt`] are re-exported from `futures`.
+//! | Unix | async-io | poll thread → FIFO |
+//! | Windows | overlapped `ReadFile` | `WaitCommEvent` thread → FIFO |
 //!
 //! ```no_run
 //! use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
 //!
 //! # async fn example() -> std::io::Result<()> {
-//! let mut stream = new("/dev/ttyUSB0", 115200).open()?;
-//! stream.write_all(b"PING\r\n").await?;
+//! let mut port = new("/dev/ttyUSB0", 115200).open()?;
+//! port.write_all(b"PING\r\n").await?;
 //! let mut buf = [0u8; 256];
-//! let n = stream.read(&mut buf).await?;
-//! # let _ = n;
+//! let _ = port.read(&mut buf).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! With the `stream` feature, [`TryStreamExt::try_next`] yields whole FIFO chunks:
+//!
+//! ```ignore
+//! use serialport_stream::{new, TryStreamExt};
+//!
+//! # async fn stream_example() -> std::io::Result<()> {
+//! let mut stream = new("/dev/ttyUSB0", 115200).open()?;
+//! while let Some(bytes) = stream.try_next().await? {
+//!     println!("{bytes:?}");
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -92,29 +90,7 @@ impl EventsInnerRead {
     }
 }
 
-/// Builder for serial port path, line settings, and one-shot open options.
-///
-/// Created with [`new()`], configured with chained methods, then finalized with
-/// [`open()`](SerialPortStreamBuilder::open).
-///
-/// # Example
-///
-/// ```no_run
-/// use serialport_stream::new;
-/// use serialport_stream::{ClearBuffer, DataBits, FlowControl, Parity, StopBits};
-///
-/// # fn example() -> std::io::Result<()> {
-/// let stream = new("/dev/ttyUSB0", 115200)
-///     .data_bits(DataBits::Eight)
-///     .parity(Parity::None)
-///     .stop_bits(StopBits::One)
-///     .flow_control(FlowControl::None)
-///     .dtr_on_open(true)
-///     .clear(ClearBuffer::All)
-///     .open()?;
-/// # Ok(())
-/// # }
-/// ```
+/// Path, line settings, and open-time options. Start with [`new()`], then [`open()`](Self::open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortStreamBuilder {
     pub(crate) path: String,
@@ -224,29 +200,7 @@ impl SerialPortStreamBuilder {
     }
 }
 
-/// Creates a [`SerialPortStreamBuilder`] with default line settings (8N1, no flow control).
-///
-/// # Examples
-///
-/// Unix device path:
-///
-/// ```no_run
-/// # use serialport_stream::new;
-/// # fn example() -> std::io::Result<()> {
-/// let _stream = new("/dev/ttyUSB0", 115200).open()?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// Windows COM port:
-///
-/// ```no_run
-/// # use serialport_stream::new;
-/// # fn example() -> std::io::Result<()> {
-/// let _stream = new("COM3", 9600).open()?;
-/// # Ok(())
-/// # }
-/// ```
+/// Builder with default 8N1, no flow control (`/dev/ttyUSB0`, `COM3`, etc.).
 pub fn new<'a>(
     path: impl Into<std::borrow::Cow<'a, str>>,
     baud_rate: u32,
@@ -263,36 +217,7 @@ pub fn new<'a>(
     }
 }
 
-/// An opened serial port for async reads and writes.
-///
-/// # Read behavior
-///
-/// - **Unix:** [`AsyncRead`] polls the port fd directly via async-io.
-/// - **Windows:** [`AsyncRead`] uses overlapped `ReadFile` with a windows thread-pool completion.
-///
-/// Enable the `stream` feature for [`Stream`] / [`SerialPortStream::try_poll_next`]. That starts a background receive
-/// pump and FIFO on both platforms. With `stream` enabled, [`AsyncRead`] and [`Stream`] both read
-/// from the same FIFO.
-///
-/// # Write behavior
-///
-/// Both platforms use direct async polling (async-io on Unix, overlapped `WriteFile` + windows thread-pool completion).
-///
-/// # Example
-///
-/// ```no_run
-/// use serialport_stream::new;
-/// use futures::io::{AsyncReadExt, AsyncWriteExt};
-///
-/// # async fn example() -> std::io::Result<()> {
-/// let mut stream = new("COM3", 115200).open()?;
-/// stream.write_all(&[0x0a, 0xC0]).await?;
-/// let mut buf = [0u8; 256];
-/// let n = stream.read(&mut buf).await?;
-/// # let _ = n;
-/// # Ok(())
-/// # }
-/// ```
+/// Open serial port: [`AsyncRead`], [`AsyncWrite`], and with `stream` also [`Stream`].
 pub struct SerialPortStream {
     platform: PlatformStream,
     #[cfg(feature = "stream")]
@@ -360,12 +285,7 @@ impl SerialPortStream {
     }
 
     #[cfg(feature = "stream")]
-    /// Polls for the next received chunk, same as [`Stream::poll_next`].
-    ///
-    /// When ready, returns `Poll::Ready(Some(Ok(vec)))` with every byte currently buffered in the
-    /// receive FIFO, or `Poll::Pending` if the pump thread has not yet delivered data.
-    ///
-    /// Requires the `stream` Cargo feature.
+    /// Drains the receive FIFO into one `Vec` (`stream` feature).
     pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -489,9 +409,7 @@ impl SerialPortReader {
     }
 
     #[cfg(feature = "stream")]
-    /// Polls for the next received chunk, same as [`Stream::poll_next`].
-    ///
-    /// Requires the `stream` Cargo feature.
+    /// Drains the receive FIFO into one `Vec` (`stream` feature).
     pub fn try_poll_next(
         &mut self,
         cx: &mut Context<'_>,

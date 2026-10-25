@@ -14,6 +14,8 @@ use windows_sys::Win32::System::IO::*;
 
 #[cfg(feature = "stream")]
 use crate::EventsInnerRead;
+#[cfg(feature = "stream")]
+use std::mem::MaybeUninit;
 use crate::SerialPortStreamBuilder;
 
 mod comm;

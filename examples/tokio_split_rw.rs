@@ -1,14 +1,21 @@
 //! Concurrent async read/write using split reader and writer halves.
 //!
+//! With `stream`, the read task uses [`TryStreamExt::try_next`] on the reader half.
+//!
 //! Run:
 //! ```text
 //! cargo run --example tokio_split_rw -- /dev/ttyUSB0 115200
+//! cargo run --example tokio_split_rw --features stream -- /dev/ttyUSB0 115200
 //! cargo run --example tokio_split_rw --features tracing -- /dev/ttyUSB0 115200 --trace
 //! ```
 
 use anyhow::Result;
 use clap::{Arg, Command};
-use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
+use serialport_stream::{new, AsyncWriteExt};
+#[cfg(not(feature = "stream"))]
+use serialport_stream::AsyncReadExt;
+#[cfg(feature = "stream")]
+use serialport_stream::TryStreamExt;
 use tokio::signal::ctrl_c;
 
 const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
@@ -16,7 +23,7 @@ const WRITE_PAYLOAD: &[u8] = &[0x0a, 0xC0];
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches = Command::new("Serialport split read/write example (Tokio)")
-        .about("Concurrent AsyncRead and AsyncWrite on split halves")
+        .about("Concurrent read and AsyncWrite on split halves")
         .disable_version_flag(true)
         .arg(
             Arg::new("port")
@@ -47,22 +54,36 @@ async fn main() -> Result<()> {
     }
 
     println!("Opening {} @ {} baud", port_name, baud_rate);
+    #[cfg(feature = "stream")]
+    println!("Read path: Stream try_next on reader half");
+    #[cfg(not(feature = "stream"))]
+    println!("Read path: AsyncRead on reader half");
 
     let stream = new(port_name, baud_rate).dtr_on_open(true).open()?;
     let (mut reader, mut writer) = stream.split();
 
-    // Match tokio_async_rw pacing: write, flush, then read — but on separate tasks.
-
     let read_task = tokio::spawn(async move {
         loop {
-            let mut buf = [0u8; 256];
-            match reader.read(&mut buf).await {
-                Ok(len) => {
-                    println!("received {len}");
+            #[cfg(not(feature = "stream"))]
+            {
+                let mut buf = [0u8; 256];
+                match reader.read(&mut buf).await {
+                    Ok(len) => println!("received {len}"),
+                    Err(e) => {
+                        eprintln!("read error: {e}");
+                        break;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("read error: {e}");
-                    break;
+            }
+            #[cfg(feature = "stream")]
+            {
+                match reader.try_next().await {
+                    Ok(Some(bytes)) => println!("received {}", bytes.len()),
+                    Ok(None) => panic!("unexpected output"),
+                    Err(e) => {
+                        eprintln!("read error: {e}");
+                        break;
+                    }
                 }
             }
         }

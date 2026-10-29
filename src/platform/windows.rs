@@ -127,7 +127,7 @@ impl std::fmt::Debug for WriteShared {
 #[cfg(not(feature = "stream"))]
 enum ReadIoState {
     Idle,
-    InFlight { op: InFlightOp, buffer: Vec<u8> },
+    Waiting { op: InFlightOp, _mask: Box<u32> },
 }
 
 #[cfg(not(feature = "stream"))]
@@ -147,7 +147,7 @@ impl std::fmt::Debug for ReadShared {
         let in_flight = matches!(
             self.state
                 .lock()
-                .map(|s| matches!(*s, ReadIoState::InFlight { .. })),
+                .map(|s| matches!(*s, ReadIoState::Waiting { .. })),
             Ok(true)
         );
         f.debug_struct("ReadShared")
@@ -241,7 +241,7 @@ impl Drop for PlatformRead {
         #[cfg(not(feature = "stream"))]
         {
             self.read_shared.wait.clear();
-            if let ReadIoState::InFlight { op, .. } = &mut *self.read_shared.state.lock().unwrap() {
+            if let ReadIoState::Waiting { op, .. } = &mut *self.read_shared.state.lock().unwrap() {
                 cancel_overlapped(self.read_port.raw(), op.overlapped.as_mut_ptr());
             }
         }
@@ -314,6 +314,11 @@ impl PlatformStream {
                 err.kind(),
                 format!("SetCommTimeouts failed: {err}"),
             ));
+        }
+
+        #[cfg(not(feature = "stream"))]
+        if unsafe { SetCommMask(port.raw(), EV_RXCHAR) } == FALSE {
+            return Err(io::Error::last_os_error());
         }
 
         #[cfg(feature = "stream")]
@@ -391,81 +396,59 @@ impl PlatformStream {
 impl PlatformRead {
     #[cfg(not(feature = "stream"))]
     pub fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let handle = self.read_port.raw();
         let shared = &self.read_shared;
         shared.wait.waker.register(cx.waker());
         let mut state = shared.state.lock().unwrap();
-        match &mut *state {
-            ReadIoState::Idle => {
-                let mut op = match InFlightOp::new() {
-                    Ok(v) => v,
-                    Err(e) => return Poll::Ready(Err(e)),
-                };
-                let mut read_buf = vec![0u8; buf.len()];
-                let ok = unsafe {
-                    ReadFile(
-                        handle,
-                        read_buf.as_mut_ptr() as *mut _,
-                        read_buf.len() as u32,
-                        ptr::null_mut(),
-                        op.overlapped.as_mut_ptr(),
-                    )
-                };
-                if ok != FALSE {
-                    let mut bytes_read: u32 = 0;
-                    if unsafe {
-                        GetOverlappedResult(
-                            handle,
-                            op.overlapped.as_mut_ptr(),
-                            &mut bytes_read,
-                            TRUE,
-                        )
-                    } == FALSE
-                    {
-                        return Poll::Ready(Err(io::Error::last_os_error()));
-                    }
-                    let n = bytes_read as usize;
-                    buf[..n].copy_from_slice(&read_buf[..n]);
-                    return Poll::Ready(Ok(n));
-                }
-                let io_err = unsafe { GetLastError() };
-                if io_err != ERROR_IO_PENDING {
-                    return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
-                }
-                let event = op.event();
-                if let Err(err) = register_overlapped_wait(&shared.wait, event) {
-                    return Poll::Ready(Err(err));
-                }
-                *state = ReadIoState::InFlight {
-                    op,
-                    buffer: read_buf,
-                };
-                Poll::Pending
-            }
-            ReadIoState::InFlight { ref mut op, buffer } => match poll_in_flight(handle, op) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(bytes)) => {
-                    shared.wait.clear();
-                    let n = bytes as usize;
-                    if n == 0 {
-                        // on windows it is difficult to avoid 0 read and read any combo with COMMTIMEOUT settings
-                        // Typically the first read for some reason is 0, so wake up the runtime immediatly to poll again in
-                        // idle state
+        loop {
+            if let ReadIoState::Waiting { ref mut op, .. } = &mut *state {
+                match poll_in_flight(handle, op) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(_)) => {
+                        shared.wait.clear();
                         *state = ReadIoState::Idle;
-                        cx.waker().clone().wake();
-                        return Poll::Pending;
                     }
-                    buf[..n].copy_from_slice(&buffer[..n]);
-                    *state = ReadIoState::Idle;
-                    Poll::Ready(Ok(n))
+                    Poll::Ready(Err(err)) => {
+                        shared.wait.clear();
+                        cancel_overlapped(handle, op.overlapped.as_mut_ptr());
+                        *state = ReadIoState::Idle;
+                        return Poll::Ready(Err(err));
+                    }
                 }
-                Poll::Ready(Err(err)) => {
-                    shared.wait.clear();
-                    cancel_overlapped(handle, op.overlapped.as_mut_ptr());
-                    *state = ReadIoState::Idle;
-                    Poll::Ready(Err(err))
+            }
+
+            let queued = match rx_queued(handle) {
+                Ok(v) => v as usize,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            if queued > 0 {
+                let len = queued.min(buf.len());
+                match read_available(handle, &mut buf[..len]) {
+                    Ok(0) => continue,
+                    res => return Poll::Ready(res),
                 }
-            },
+            }
+
+            let mut op = match InFlightOp::new() {
+                Ok(v) => v,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            let mut mask = Box::new(0u32);
+            if unsafe { WaitCommEvent(handle, &mut *mask, op.overlapped.as_mut_ptr()) } != FALSE {
+                continue;
+            }
+            let io_err = unsafe { GetLastError() };
+            if io_err != ERROR_IO_PENDING {
+                return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
+            }
+            if let Err(err) = register_overlapped_wait(&shared.wait, op.event()) {
+                cancel_overlapped(handle, op.overlapped.as_mut_ptr());
+                return Poll::Ready(Err(err));
+            }
+            *state = ReadIoState::Waiting { op, _mask: mask };
         }
     }
 
@@ -733,6 +716,40 @@ fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<
         wait.wait_handle.store(wait_handle, Ordering::Release);
     }
     Ok(())
+}
+
+#[cfg(not(feature = "stream"))]
+fn rx_queued(handle: HANDLE) -> io::Result<u32> {
+    let mut errors: u32 = 0;
+    let mut comstat: COMSTAT = unsafe { std::mem::zeroed() };
+    if unsafe { ClearCommError(handle, &mut errors, &mut comstat) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(comstat.cbInQue)
+}
+
+#[cfg(not(feature = "stream"))]
+fn read_available(handle: HANDLE, buf: &mut [u8]) -> io::Result<usize> {
+    let mut op = InFlightOp::new()?;
+    let ok = unsafe {
+        ReadFile(
+            handle,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            ptr::null_mut(),
+            op.overlapped.as_mut_ptr(),
+        )
+    };
+    if ok == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
+        return Err(io::Error::last_os_error());
+    }
+    let mut bytes_read: u32 = 0;
+    if unsafe { GetOverlappedResult(handle, op.overlapped.as_mut_ptr(), &mut bytes_read, TRUE) }
+        == FALSE
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(bytes_read as usize)
 }
 
 fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {

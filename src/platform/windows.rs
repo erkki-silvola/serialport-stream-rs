@@ -88,7 +88,7 @@ impl OverlappedWait {
         let handle = self.wait_handle.swap(ptr::null_mut(), Ordering::AcqRel);
         if !handle.is_null() {
             unsafe {
-                UnregisterWaitEx(handle as HANDLE, ptr::null_mut());
+                UnregisterWaitEx(handle as HANDLE, INVALID_HANDLE_VALUE);
             }
         }
     }
@@ -647,7 +647,6 @@ unsafe extern "system" fn overlapped_wait_callback(
     _timed_out: bool,
 ) {
     let wait = &*(context as *const OverlappedWait);
-    wait.wait_handle.store(ptr::null_mut(), Ordering::Release);
     wait.waker.wake();
 }
 

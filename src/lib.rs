@@ -14,7 +14,7 @@
 //! | Platform | Direct read | `stream` pump |
 //! | --- | --- | --- |
 //! | Unix | async-io | poll thread → FIFO |
-//! | Windows | overlapped `ReadFile` | `WaitCommEvent` thread → FIFO |
+//! | Windows | `WaitCommEvent` + driver queue | `WaitCommEvent` thread → FIFO |
 //!
 //! ```no_run
 //! use serialport_stream::{new, AsyncReadExt, AsyncWriteExt};
@@ -314,10 +314,11 @@ impl SerialPortStream {
     /// Splits this port into independently usable read and write halves.
     ///
     /// Each half implements the appropriate async I/O trait and can be moved to a
-    /// separate task or OS thread for concurrent read/write use. Do not use multiple
-    /// readers or multiple writers on the same port.
+    /// separate task or OS thread for concurrent read/write use. The third tuple
+    /// element holds line settings (e.g. [`SerialportSettings::set_baudrate`]) and
+    /// can be kept while the halves are in use elsewhere.
     ///
-    pub fn split(self) -> (SerialPortReader, SerialPortWriter) {
+    pub fn split(self) -> (SerialPortReader, SerialPortWriter, SerialportSettings) {
         let Self {
             platform,
             #[cfg(feature = "stream")]
@@ -334,10 +335,10 @@ impl SerialPortStream {
             },
             SerialPortWriter {
                 platform: platform_write,
-                settings,
                 flush_task,
                 write_in_flight,
             },
+            SerialportSettings { settings },
         )
     }
 }
@@ -465,9 +466,17 @@ impl Stream for SerialPortReader {
 /// Created by [`SerialPortStream::split`]. Implements [`AsyncWrite`].
 pub struct SerialPortWriter {
     platform: PlatformWrite,
-    settings: PlatformSettings,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
     write_in_flight: bool,
+}
+
+/// Line settings for a split port (baud rate, etc.).
+///
+/// Returned as the third value from [`SerialPortStream::split`]. Keeps the shared
+/// settings handle so methods like [`Self::set_baudrate`] work while
+/// [`SerialPortReader`] and [`SerialPortWriter`] are owned by other tasks.
+pub struct SerialportSettings {
+    settings: PlatformSettings,
 }
 
 impl std::fmt::Debug for SerialPortWriter {
@@ -480,7 +489,7 @@ impl std::fmt::Debug for SerialPortWriter {
     }
 }
 
-impl SerialPortWriter {
+impl SerialportSettings {
     /// Sets the baud rate (bits per second) on an already-open port.
     ///
     /// Other line settings (data bits, parity, stop bits, flow control) remain unchanged.

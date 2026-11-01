@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     println!("Read path: AsyncRead on reader half");
 
     let stream = new(port_name, baud_rate).dtr_on_open(true).open()?;
-    let (mut reader, mut writer) = stream.split();
+    let (mut reader, mut writer, _) = stream.split();
 
     let read_task = tokio::spawn(async move {
         loop {

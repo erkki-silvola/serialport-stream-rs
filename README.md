@@ -32,7 +32,7 @@ The FIFO has **no backpressure**: if the app reads slower than the device sends,
 | Platform | Direct `AsyncRead` | Background pump (`stream`) |
 | --- | --- | --- |
 | Unix | async-io poll on the fd | Poll-based read thread → FIFO |
-| Windows | Overlapped `ReadFile` + thread pool | `WaitCommEvent` read thread → FIFO |
+| Windows | `WaitCommEvent` + driver queue read | `WaitCommEvent` read thread → FIFO |
 
 ## Quick start
 
@@ -50,7 +50,7 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Open with [`new(path, baud)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), chain `.data_bits`, `.parity`, `.stop_bits`, `.flow_control`, `.dtr_on_open`, `.clear`, then `.open()`. Use [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) for concurrent read/write tasks.
+Open with [`new(path, baud)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), chain `.data_bits`, `.parity`, `.stop_bits`, `.flow_control`, `.dtr_on_open`, `.clear`, then `.open()`. [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) returns read and write halves plus a [`SerialportSettings`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialportSettings.html) handle (e.g. `set_baudrate`) for concurrent read/write tasks.
 
 For native `tokio::io` traits, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html).
 

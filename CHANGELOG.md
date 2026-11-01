@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.2] - 2026-11-xx
+## [0.5.2] - 2026-11-01
 
 ##### Changed
 
-* Windows default (non-`stream`) [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html): wait for receive data with `WaitCommEvent`, then read from the driver queue instead of overlapped `ReadFile`, avoiding spurious zero-byte reads.
+* Windows default (non-`stream`) [`AsyncRead`](https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html): wait for receive data with `WaitCommEvent`, then read from the driver queue instead of overlapped `ReadFile`, avoiding long reads on multi threaded setup.
 * [`SerialPortStream::split`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) returns `(SerialPortReader, SerialPortWriter, SerialportSettings)`. Line-setting helpers such as [`SerialportSettings::set_baudrate`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialportSettings.html#method.set_baudrate) live on the settings handle so they can be used while read and write halves run concurrently.
 
 ##### Breaking

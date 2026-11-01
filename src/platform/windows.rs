@@ -15,8 +15,6 @@ use windows_sys::Win32::System::IO::*;
 #[cfg(feature = "stream")]
 use crate::EventsInnerRead;
 use crate::SerialPortStreamBuilder;
-#[cfg(feature = "stream")]
-use std::mem::MaybeUninit;
 
 mod comm;
 
@@ -49,7 +47,6 @@ impl Overlapped {
         &mut self.overlapped
     }
 
-    #[cfg(feature = "stream")]
     fn reset(&mut self) -> io::Result<()> {
         if unsafe { ResetEvent(self._event.as_raw_handle() as HANDLE) } == FALSE {
             return Err(io::Error::last_os_error());
@@ -127,7 +124,7 @@ impl std::fmt::Debug for WriteShared {
 #[cfg(not(feature = "stream"))]
 enum ReadIoState {
     Idle,
-    InFlight { op: InFlightOp, buffer: Vec<u8> },
+    Waiting { op: InFlightOp, _mask: Box<u32> },
 }
 
 #[cfg(not(feature = "stream"))]
@@ -147,7 +144,7 @@ impl std::fmt::Debug for ReadShared {
         let in_flight = matches!(
             self.state
                 .lock()
-                .map(|s| matches!(*s, ReadIoState::InFlight { .. })),
+                .map(|s| matches!(*s, ReadIoState::Waiting { .. })),
             Ok(true)
         );
         f.debug_struct("ReadShared")
@@ -241,7 +238,7 @@ impl Drop for PlatformRead {
         #[cfg(not(feature = "stream"))]
         {
             self.read_shared.wait.clear();
-            if let ReadIoState::InFlight { op, .. } = &mut *self.read_shared.state.lock().unwrap() {
+            if let ReadIoState::Waiting { op, .. } = &mut *self.read_shared.state.lock().unwrap() {
                 cancel_overlapped(self.read_port.raw(), op.overlapped.as_mut_ptr());
             }
         }
@@ -314,6 +311,10 @@ impl PlatformStream {
                 err.kind(),
                 format!("SetCommTimeouts failed: {err}"),
             ));
+        }
+
+        if unsafe { SetCommMask(port.raw(), EV_RXCHAR) } == FALSE {
+            return Err(io::Error::last_os_error());
         }
 
         #[cfg(feature = "stream")]
@@ -394,79 +395,61 @@ impl PlatformRead {
         let handle = self.read_port.raw();
         let shared = &self.read_shared;
         shared.wait.waker.register(cx.waker());
+
         let mut state = shared.state.lock().unwrap();
-        match &mut *state {
-            ReadIoState::Idle => {
-                let mut op = match InFlightOp::new() {
-                    Ok(v) => v,
-                    Err(e) => return Poll::Ready(Err(e)),
-                };
-                let mut read_buf = vec![0u8; buf.len()];
-                let ok = unsafe {
-                    ReadFile(
-                        handle,
-                        read_buf.as_mut_ptr() as *mut _,
-                        read_buf.len() as u32,
-                        ptr::null_mut(),
-                        op.overlapped.as_mut_ptr(),
-                    )
-                };
-                if ok != FALSE {
-                    let mut bytes_read: u32 = 0;
-                    if unsafe {
-                        GetOverlappedResult(
-                            handle,
-                            op.overlapped.as_mut_ptr(),
-                            &mut bytes_read,
-                            TRUE,
-                        )
-                    } == FALSE
-                    {
-                        return Poll::Ready(Err(io::Error::last_os_error()));
-                    }
-                    let n = bytes_read as usize;
-                    buf[..n].copy_from_slice(&read_buf[..n]);
-                    return Poll::Ready(Ok(n));
-                }
-                let io_err = unsafe { GetLastError() };
-                if io_err != ERROR_IO_PENDING {
-                    return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
-                }
-                let event = op.event();
-                if let Err(err) = register_overlapped_wait(&shared.wait, event) {
-                    return Poll::Ready(Err(err));
-                }
-                *state = ReadIoState::InFlight {
-                    op,
-                    buffer: read_buf,
-                };
-                Poll::Pending
-            }
-            ReadIoState::InFlight { ref mut op, buffer } => match poll_in_flight(handle, op) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(bytes)) => {
+        if let ReadIoState::Waiting { ref mut op, .. } = &mut *state {
+            match poll_in_flight(handle, op) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(_)) => {
                     shared.wait.clear();
-                    let n = bytes as usize;
-                    if n == 0 {
-                        // on windows it is difficult to avoid 0 read and read any combo with COMMTIMEOUT settings
-                        // Typically the first read for some reason is 0, so wake up the runtime immediatly to poll again in
-                        // idle state
-                        *state = ReadIoState::Idle;
-                        cx.waker().clone().wake();
-                        return Poll::Pending;
-                    }
-                    buf[..n].copy_from_slice(&buffer[..n]);
                     *state = ReadIoState::Idle;
-                    Poll::Ready(Ok(n))
+                    // fall to check the queue
                 }
                 Poll::Ready(Err(err)) => {
                     shared.wait.clear();
                     cancel_overlapped(handle, op.overlapped.as_mut_ptr());
                     *state = ReadIoState::Idle;
-                    Poll::Ready(Err(err))
+                    return Poll::Ready(Err(err));
                 }
-            },
+            }
         }
+        // check first if pending data in driver buffer
+        let queued = match rx_queued(handle) {
+            Ok(v) => v as usize,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        if queued > 0 {
+            let len = queued.min(buf.len());
+            let mut overlapped = match Overlapped::new() {
+                Ok(v) => v,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            let result_len = read_available(handle, &mut overlapped, &mut buf[..len])?;
+            return Poll::Ready(Ok(result_len));
+        }
+
+        let mut op = match InFlightOp::new() {
+            Ok(v) => v,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let mut mask = Box::new(0u32);
+        unsafe {
+            assert_eq!(
+                WaitCommEvent(handle, &mut *mask, op.overlapped.as_mut_ptr()),
+                0
+            )
+        };
+
+        let io_err = unsafe { GetLastError() };
+        if io_err != ERROR_IO_PENDING {
+            return Poll::Ready(Err(io::Error::from_raw_os_error(io_err as _)));
+        }
+        if let Err(err) = register_overlapped_wait(&shared.wait, op.event()) {
+            cancel_overlapped(handle, op.overlapped.as_mut_ptr());
+            return Poll::Ready(Err(err));
+        }
+        *state = ReadIoState::Waiting { op, _mask: mask };
+        Poll::Pending
     }
 
     #[cfg(feature = "stream")]
@@ -508,10 +491,6 @@ impl PlatformRead {
         let mut buffer = Vec::with_capacity(1024);
 
         Self::purge_pending_data(handle, &read_inner, &mut read_overlapped, &mut buffer)?;
-
-        if unsafe { SetCommMask(handle, EV_RXCHAR) } == FALSE {
-            return Err(io::Error::last_os_error());
-        }
 
         loop {
             event_overlapped.reset()?;
@@ -570,54 +549,11 @@ impl PlatformRead {
         overlapped: &mut Overlapped,
         buffer: &mut Vec<u8>,
     ) -> io::Result<()> {
-        let mut errors: u32 = 0;
-        let mut comstat = MaybeUninit::<COMSTAT>::uninit();
-
-        if unsafe { ClearCommError(handle, &mut errors, comstat.as_mut_ptr()) } == FALSE {
-            return Err(io::Error::last_os_error());
-        }
-
-        let len = unsafe { comstat.assume_init() }.cbInQue;
+        let len = rx_queued(handle)?;
         if len > 0 {
             buffer.resize(len as usize, 0);
-            overlapped.reset()?;
-            let mut bytes_read: u32 = 0;
-
-            if unsafe {
-                ReadFile(
-                    handle,
-                    buffer.as_mut_ptr() as *mut _,
-                    buffer.len() as u32,
-                    &mut bytes_read,
-                    overlapped.as_mut_ptr(),
-                )
-            } == FALSE
-            {
-                if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                    match unsafe { WaitForSingleObject(overlapped.event(), INFINITE) } {
-                        WAIT_OBJECT_0 => {
-                            if unsafe {
-                                GetOverlappedResult(
-                                    handle,
-                                    overlapped.as_mut_ptr(),
-                                    &mut bytes_read,
-                                    TRUE,
-                                )
-                            } == FALSE
-                            {
-                                return Err(io::Error::last_os_error());
-                            }
-                        }
-                        _ => {
-                            return Err(io::Error::last_os_error());
-                        }
-                    }
-                } else {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-
-            buffer.truncate(bytes_read as usize);
+            let bytes_read = read_available(handle, overlapped, buffer)?;
+            buffer.truncate(bytes_read);
             read_inner
                 .in_buffer
                 .lock()
@@ -672,6 +608,7 @@ impl PlatformWrite {
                 }
                 let event = op.event();
                 if let Err(err) = register_overlapped_wait(&shared.wait, event) {
+                    cancel_overlapped(handle, op.overlapped.as_mut_ptr());
                     return Poll::Ready(Err(err));
                 }
                 *state = IoState::InFlight(op);
@@ -733,6 +670,51 @@ fn register_overlapped_wait(wait: &OverlappedWait, event: HANDLE) -> io::Result<
         wait.wait_handle.store(wait_handle, Ordering::Release);
     }
     Ok(())
+}
+
+fn rx_queued(handle: HANDLE) -> io::Result<u32> {
+    let mut errors: u32 = 0;
+    let mut comstat: COMSTAT = unsafe { std::mem::zeroed() };
+    if unsafe { ClearCommError(handle, &mut errors, &mut comstat) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(comstat.cbInQue)
+}
+
+fn read_available(
+    handle: HANDLE,
+    overlapped: &mut Overlapped,
+    buf: &mut [u8],
+) -> io::Result<usize> {
+    overlapped.reset()?;
+    let mut bytes_read: u32 = 0;
+    if unsafe {
+        ReadFile(
+            handle,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            &mut bytes_read,
+            overlapped.as_mut_ptr(),
+        )
+    } == FALSE
+    {
+        if unsafe { GetLastError() } == ERROR_IO_PENDING {
+            match unsafe { WaitForSingleObject(overlapped.event(), INFINITE) } {
+                WAIT_OBJECT_0 => {
+                    if unsafe {
+                        GetOverlappedResult(handle, overlapped.as_mut_ptr(), &mut bytes_read, TRUE)
+                    } == FALSE
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                _ => return Err(io::Error::last_os_error()),
+            }
+        } else {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(bytes_read as usize)
 }
 
 fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {

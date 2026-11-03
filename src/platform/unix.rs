@@ -148,6 +148,9 @@ impl Drop for PlatformRead {
 
 impl Drop for PlatformWrite {
     fn drop(&mut self) {
+        // note specially on linux if there was a large write -> then drop, the fd will hang until bytes are written
+        // therefore we need to drain/clear the output for better system responsiveness
+        //
         let _ = serial::clear(self.flush_fd.as_raw_fd(), crate::ClearBuffer::Output);
     }
 }
@@ -225,6 +228,9 @@ impl PlatformStream {
         self.read.start_read_thread();
     }
 
+    // Note on macos if caller does not flush between the writes, the poll_write comletes quickly
+    // until the write buffer is full on driver side
+    //
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         self.write.poll_write(cx, buf)
     }

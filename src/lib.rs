@@ -1,4 +1,4 @@
-//! Async serial I/O as [`AsyncRead`] / [`AsyncWrite`], optional [`Stream`] (`stream` feature).
+//! Async serial I/O as [`AsyncRead`] / [`AsyncWrite`], optional [`Stream`](futures::stream::Stream) (`stream` feature).
 //!
 //! [`futures`] traits only — no async runtime dependency. Open via [`new`] → builder → `.open()`.
 //!
@@ -7,7 +7,7 @@
 //! **Without `stream`:** [`AsyncRead`] polls the port directly; each read returns up to the caller's
 //! buffer size.
 //!
-//! **With `stream`:** a background thread pumps received bytes into a FIFO. [`Stream`] / `try_next`
+//! **With `stream`:** a background thread pumps received bytes into a FIFO. [`Stream`](futures::stream::Stream) / `try_next`
 //! drain the whole FIFO per item; [`AsyncRead`] reads up to the buffer and leaves the rest. Pick one
 //! read API per port — mixing them splits data across calls. The FIFO has no backpressure.
 //!
@@ -28,7 +28,7 @@
 //! # }
 //! ```
 //!
-//! With the `stream` feature, [`TryStreamExt::try_next`] yields whole FIFO chunks:
+//! With the `stream` feature, [`TryStreamExt::try_next`](futures::stream::TryStreamExt::try_next) yields whole FIFO chunks:
 //!
 //! ```ignore
 //! use serialport_stream::{new, TryStreamExt};
@@ -41,6 +41,8 @@
 //! # Ok(())
 //! # }
 //! ```
+
+#![allow(rustdoc::redundant_explicit_links)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -217,7 +219,7 @@ pub fn new<'a>(
     }
 }
 
-/// Open serial port: [`AsyncRead`], [`AsyncWrite`], and with `stream` also [`Stream`].
+/// Open serial port: [`AsyncRead`], [`AsyncWrite`], and with `stream` also [`Stream`](futures::stream::Stream).
 pub struct SerialPortStream {
     platform: PlatformStream,
     #[cfg(feature = "stream")]
@@ -346,7 +348,7 @@ impl SerialPortStream {
 /// Read half of a split serial port.
 ///
 /// Created by [`SerialPortStream::split`]. Implements [`AsyncRead`], and with the
-/// `stream` feature also [`Stream`] and [`SerialPortReader::try_poll_next`].
+/// `stream` feature also [`Stream`](futures::stream::Stream) and `try_poll_next`.
 pub struct SerialPortReader {
     platform: PlatformRead,
     #[cfg(feature = "stream")]

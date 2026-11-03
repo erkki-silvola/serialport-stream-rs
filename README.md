@@ -52,6 +52,11 @@ async fn main() -> std::io::Result<()> {
 
 Open with [`new(path, baud)`](https://docs.rs/serialport-stream/latest/serialport_stream/fn.new.html), chain `.data_bits`, `.parity`, `.stop_bits`, `.flow_control`, `.dtr_on_open`, `.clear`, then `.open()`. [`.split()`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialPortStream.html#method.split) returns read and write halves plus a [`SerialportSettings`](https://docs.rs/serialport-stream/latest/serialport_stream/struct.SerialportSettings.html) handle (e.g. `set_baudrate`) for concurrent read/write tasks.
 
+### Write behavior
+
+- **macOS:** without `flush` between writes, `poll_write` completes quickly until the driver-side write buffer fills(until full), so write completion doesn't mean the bytes were transmitted. Call `flush` when you need them on the wire.
+- **Unix (notably Linux):** dropping the write half after a large write could block the fd until pending bytes drain. To avoid that, drop discards unsent output (`ClearBuffer::Output`), so `flush` before dropping if every byte must be sent.
+
 For native `tokio::io` traits, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html).
 
 ## Stream (`stream` feature)

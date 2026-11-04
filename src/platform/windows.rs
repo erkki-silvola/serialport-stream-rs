@@ -518,6 +518,7 @@ impl PlatformRead {
                             )
                         } == FALSE
                         {
+                            // note cannot use last_os_error here, as even though the code is 995(device detach), but the error type is TimedOut which is not correct
                             let msg = io::Error::last_os_error().to_string();
                             return Err(std::io::Error::other(format!("read failed {msg}")));
                         }
@@ -725,6 +726,7 @@ fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
             let res =
                 unsafe { GetOverlappedResult(port, op.overlapped.as_mut_ptr(), &mut bytes, TRUE) };
             if res == FALSE {
+                // note cannot use last_os_error here, as even though the code is 995(device detach), but the error type is TimedOut which is not correct
                 let msg = io::Error::last_os_error().to_string();
                 let err = std::io::Error::other(format!("read failed {msg}"));
                 return Poll::Ready(Err(err));

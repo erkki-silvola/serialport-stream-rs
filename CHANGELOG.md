@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-11-04
+
+##### Fixed
+
+* Windows: a failed overlapped read (`GetOverlappedResult`) previously surfaced the raw last OS error, which was reported as a timeout error. Read failures are now returned as ErrorKind::Other with a `read failed ...` message that includes the OS error text.
+
 ## [0.5.2] - 2026-11-01
 
 ##### Changed

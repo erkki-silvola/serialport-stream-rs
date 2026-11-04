@@ -54,7 +54,7 @@ Open with [`new(path, baud)`](https://docs.rs/serialport-stream/latest/serialpor
 
 ### Write behavior
 
-- **macOS:** without `flush` between writes, `poll_write` completes quickly until the driver-side write buffer fills(until full), so write completion doesn't mean the bytes were transmitted. Call `flush` when you need them on the wire.
+- **macOS:** without `flush` between writes, `poll_write` completes quickly until the driver-side write buffer is full, so write completion doesn't mean the bytes were transmitted. Call `flush` when you need them on the wire.
 - **Unix (notably Linux):** dropping the write half after a large write could block the fd until pending bytes drain. To avoid that, drop discards unsent output (`ClearBuffer::Output`), so `flush` before dropping if every byte must be sent.
 
 For native `tokio::io` traits, bridge via [`tokio_util::compat`](https://docs.rs/tokio-util/latest/tokio_util/compat/index.html).

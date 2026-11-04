@@ -228,7 +228,7 @@ impl PlatformStream {
         self.read.start_read_thread();
     }
 
-    // Note on macos if caller does not flush between the writes, the poll_write comletes quickly
+    // Note on macos if caller does not flush between the writes, the poll_write completes quickly
     // until the write buffer is full on driver side
     //
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {

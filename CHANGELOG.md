@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Windows: a failed overlapped read (`GetOverlappedResult`) previously surfaced the raw last OS error, which was reported as a timeout error. Read failures are now returned as ErrorKind::Other with a `read failed ...` message that includes the OS error text.
 
+##### Changed
+
+* README and crate docs document macOS write buffering (use `flush` when bytes must be on the wire) and Unix write-half drop behavior (unsent output is discarded on drop).
+
 ## [0.5.2] - 2026-11-01
 
 ##### Changed

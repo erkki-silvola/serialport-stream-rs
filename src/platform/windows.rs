@@ -518,7 +518,8 @@ impl PlatformRead {
                             )
                         } == FALSE
                         {
-                            return Err(io::Error::last_os_error());
+                            let msg = io::Error::last_os_error().to_string();
+                            return Err(std::io::Error::other(format!("read failed {msg}")));
                         }
                         Self::purge_pending_data(
                             handle,
@@ -724,7 +725,8 @@ fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
             let res =
                 unsafe { GetOverlappedResult(port, op.overlapped.as_mut_ptr(), &mut bytes, TRUE) };
             if res == FALSE {
-                let err = io::Error::last_os_error();
+                let msg = io::Error::last_os_error().to_string();
+                let err = std::io::Error::other(format!("read failed {msg}"));
                 return Poll::Ready(Err(err));
             }
             Poll::Ready(Ok(bytes))

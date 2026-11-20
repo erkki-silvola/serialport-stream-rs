@@ -120,8 +120,20 @@ cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB0 115200
 
 Several examples accept `--trace` when built with `--features tracing`.
 
+## Acknowledgements
+
+Some of the platform I/O code is inspired by [serialport-rs](https://github.com/serialport/serialport-rs).
+
 ## License
 
-Dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT).
+This project is licensed under either of:
 
-Platform I/O is partly inspired by [serialport-rs](https://github.com/serialport/serialport-rs).
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+

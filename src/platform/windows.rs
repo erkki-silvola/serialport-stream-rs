@@ -297,6 +297,9 @@ impl PlatformStream {
             comm::clear(port.raw(), buffer)?;
         }
 
+        // this combo seemed to be the only one, to have read some behaviour,
+        // original async read implementation had a one quirk, first read would return 0, which was compensated
+        // current implementation does not rely on this as we first purge driver input buffer, if empty waits for incoming data
         let timeouts = COMMTIMEOUTS {
             ReadIntervalTimeout: 1,
             ReadTotalTimeoutMultiplier: 0,
@@ -390,6 +393,9 @@ impl PlatformStream {
 }
 
 impl PlatformRead {
+    /// this approach was taken after testing split support, if readfile file is directly called it seemed
+    /// to wakeup only until the requested amount bytes was available, this only occured when running read and write is separate
+    /// tasks(threads)
     #[cfg(not(feature = "stream"))]
     pub fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         let handle = self.read_port.raw();

@@ -228,9 +228,6 @@ impl PlatformStream {
         self.read.start_read_thread();
     }
 
-    // Note on macos if caller does not flush between the writes, the poll_write completes quickly
-    // until the write buffer is full on driver side
-    //
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         self.write.poll_write(cx, buf)
     }
@@ -358,6 +355,10 @@ impl PlatformWrite {
         blocking::unblock(move || serial::flush_output(fd))
     }
 
+    /// Writes from `buf` without copying. On `Pending`, `async_io` retries from the same slice
+    /// after `EAGAIN`; callers must repoll with the same unsent bytes until `Ready`.
+    /// `futures` / Tokio `write` and `write_all` keep the same `&[u8]` across `Pending` polls per
+    /// chunk.
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.write_async).poll_write(cx, buf)
     }

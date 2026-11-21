@@ -575,6 +575,10 @@ impl PlatformRead {
 }
 
 impl PlatformWrite {
+    /// Writes from `buf` without copying. If this returns `Pending`, overlapped `WriteFile` still
+    /// reads from the original pointer; callers must repoll with the same slice until `Ready`.
+    /// `futures` / Tokio `write` and `write_all` (and similar helpers) keep the same `&[u8]` across
+    /// `Pending` polls for each chunk.
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let handle = self.write_port.raw();
         let shared = &self.write_shared;

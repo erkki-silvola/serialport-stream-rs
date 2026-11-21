@@ -4,6 +4,10 @@
 *.pdb
 Cargo.lock
 
+# Node binding
+node_modules/
+*.node
+
 # IDE
 .vscode/
 .idea/

@@ -17,6 +17,15 @@ examples/             # Tokio / futures-lite demos (need a real port)
 
 Platform code lives behind `PlatformStream` / `PlatformRead` / `PlatformWrite` — keep Unix and Windows behavior aligned at the `lib.rs` API level.
 
+## `platform/` — high caution
+
+Code under `src/platform/` (including `platform.rs`) is **not** routine agent edit territory. It wraps OS-specific serial I/O (termios, overlapped COMM, threading, lifetimes of kernel handles). A small mistake there can cause silent corruption, hangs, or cross-platform divergence that `lib.rs` tests will not catch.
+
+- Prefer fixing or extending behavior at the `lib.rs` / `types.rs` / `line_settings.rs` boundary unless the task explicitly requires platform changes.
+- Before editing `platform/`, read the full relevant module, trace call paths on **both** Unix and Windows, and reason about concurrency, cancellation, and resource lifetime end-to-end.
+- Do not “drive-by” refactor, reorder, or deduplicate platform code without a concrete bug or feature need.
+- Any platform change must satisfy the Win32 rules below (when on Windows), the change checklist, and be justified in the PR/commit message.
+
 ## Cargo features
 
 | Feature | Effect |

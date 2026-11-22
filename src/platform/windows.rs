@@ -499,53 +499,68 @@ impl PlatformRead {
         Self::purge_pending_data(handle, &read_inner, &mut read_overlapped, &mut buffer)?;
 
         loop {
-            event_overlapped.reset()?;
-            let mut mask: u32 = 0;
+            match unsafe { WaitForSingleObject(abort_event.raw(), 0) } {
+                WAIT_OBJECT_0 => {
+                    return Ok(());
+                }
+                WAIT_TIMEOUT => {
+                    event_overlapped.reset()?;
+                    let mut mask: u32 = 0;
 
-            assert_eq!(
-                unsafe { WaitCommEvent(handle, &mut mask, event_overlapped.as_mut_ptr()) },
-                0
-            );
+                    assert_eq!(
+                        unsafe { WaitCommEvent(handle, &mut mask, event_overlapped.as_mut_ptr()) },
+                        0
+                    );
 
-            if unsafe { GetLastError() } == ERROR_IO_PENDING {
-                let objects = [event_overlapped.event(), abort_event.raw()];
+                    if unsafe { GetLastError() } == ERROR_IO_PENDING {
+                        let objects = [event_overlapped.event(), abort_event.raw()];
 
-                match unsafe {
-                    WaitForMultipleObjects(objects.len() as u32, objects.as_ptr(), 0, INFINITE)
-                } {
-                    WAIT_OBJECT_0 => {
-                        let mut len = 0;
-                        if unsafe {
-                            GetOverlappedResult(
-                                handle,
-                                event_overlapped.as_mut_ptr(),
-                                &mut len,
-                                TRUE,
+                        match unsafe {
+                            WaitForMultipleObjects(
+                                objects.len() as u32,
+                                objects.as_ptr(),
+                                0,
+                                INFINITE,
                             )
-                        } == FALSE
-                        {
-                            // note cannot use last_os_error here, as even though the code is 995(device detach), but the error type is TimedOut which is not correct
-                            let msg = io::Error::last_os_error().to_string();
-                            return Err(std::io::Error::other(format!("read failed {msg}")));
+                        } {
+                            WAIT_OBJECT_0 => {
+                                let mut len = 0;
+                                if unsafe {
+                                    GetOverlappedResult(
+                                        handle,
+                                        event_overlapped.as_mut_ptr(),
+                                        &mut len,
+                                        TRUE,
+                                    )
+                                } == FALSE
+                                {
+                                    // note cannot use last_os_error here, as even though the code is 995(device detach), but the error type is TimedOut which is not correct
+                                    let msg = io::Error::last_os_error().to_string();
+                                    return Err(std::io::Error::other(format!(
+                                        "read failed {msg}"
+                                    )));
+                                }
+                                Self::purge_pending_data(
+                                    handle,
+                                    &read_inner,
+                                    &mut read_overlapped,
+                                    &mut buffer,
+                                )?;
+                                continue;
+                            }
+                            val if val == WAIT_OBJECT_0 + 1 => {
+                                cancel_overlapped(handle, event_overlapped.as_mut_ptr());
+                                return Ok(());
+                            }
+                            _ => {
+                                return Err(io::Error::last_os_error());
+                            }
                         }
-                        Self::purge_pending_data(
-                            handle,
-                            &read_inner,
-                            &mut read_overlapped,
-                            &mut buffer,
-                        )?;
-                        continue;
-                    }
-                    val if val == WAIT_OBJECT_0 + 1 => {
-                        cancel_overlapped(handle, event_overlapped.as_mut_ptr());
-                        return Ok(());
-                    }
-                    _ => {
+                    } else {
                         return Err(io::Error::last_os_error());
                     }
                 }
-            } else {
-                return Err(io::Error::last_os_error());
+                _ => return Err(io::Error::last_os_error()),
             }
         }
     }

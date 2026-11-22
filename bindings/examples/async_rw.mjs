@@ -1,5 +1,5 @@
 // Async read/write loop, the Node.js counterpart of the `tokio_async_rw` Rust example.
-// Usage: node examples/async_rw.mjs <path> <baud>
+// Usage: node examples/async_rw.mjs <path> <baud> [--reopen]
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -7,14 +7,16 @@ const { open } = require('../wrapper.js')
 
 const WRITE_PAYLOAD = Buffer.from([0x0a, 0xc0])
 
-const [path, baud] = process.argv.slice(2)
+const args = process.argv.slice(2)
+const reopen = args.includes('--reopen')
+const [path, baud] = args.filter((a) => a !== '--reopen')
 if (!path || !baud) {
-  console.error('usage: node examples/async_rw.mjs <path> <baud>')
+  console.error('usage: node examples/async_rw.mjs <path> <baud> [--reopen]')
   process.exit(1)
 }
 
 console.log(`Opening ${path} @ ${baud} baud`)
-const port = open(path, Number(baud), { dtrOnOpen: true })
+const port = open(path, Number(baud), { dtrOnOpen: true, autoReopen: reopen, reopenDelayMs: 500 })
 
 let stopping = false
 process.on('SIGINT', () => {
@@ -35,8 +37,7 @@ while (!stopping) {
     const data = await port.read(256)
     console.log(`received ${data.length} bytes: ${hex(data)}`)
   } catch (e) {
-    if (!stopping) console.error(`read/write error: ${e.message}`)
-    break
+    if (stopping || e.message === 'port closed') break
   }
 }
 await port.close()

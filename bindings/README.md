@@ -28,7 +28,7 @@ await port.close()
 
 ```js
 port.on('data', (data) => console.log(data))
-port.on('error', (err) => console.error(err))   // fatal read error; the port is closed
+port.on('error', (err) => console.error(err))
 port.on('close', () => console.log('closed'))
 ```
 
@@ -38,13 +38,16 @@ The first `'data'` listener starts the receive loop, and removing the last one s
 
 | Item | Description |
 | --- | --- |
-| `open(path, baudRate, options?)` | Opens the port. Options: `dataBits` (5-8), `parity` (`'none'`, `'odd'`, `'even'`), `stopBits` (1, 2), `flowControl` (`'none'`, `'software'`, `'hardware'`), `dtrOnOpen`, `clear` (`'input'`, `'output'`, `'all'`). |
+| `open(path, baudRate, options?)` | Opens the port. Options: `dataBits` (5-8), `parity` (`'none'`, `'odd'`, `'even'`), `stopBits` (1, 2), `flowControl` (`'none'`, `'software'`, `'hardware'`), `dtrOnOpen`, `clear` (`'input'`, `'output'`, `'all'`). Optional `autoReopen` (retry after I/O failure) and `reopenDelayMs` (default 500). |
 | `write(data)` | Writes all bytes and resolves after they are transmitted. |
 | `read(maxLen?)` | Resolves with the next received bytes. |
 | `close()` | Rejects pending operations with `port closed`, releases the port, and emits `'close'`. |
 | `'data'` event | Each received chunk, as a `Buffer`. |
-| `'error'` event | Fatal read error. The port is closed afterwards. |
-| `'close'` event | Emitted once after the port closes. |
+| `'error'` event | I/O or reopen failure. With `autoReopen`, the port stays open and retries unless reopen gives up. |
+| `'disconnect'` event | Link lost (`autoReopen` only). |
+| `'reconnecting'` event | Between reopen attempts (`autoReopen`). |
+| `'reopen'` event | Port opened again after a disconnect. |
+| `'close'` event | Emitted once after `close()`; disables auto-reopen. |
 
 ## Examples
 
@@ -58,4 +61,16 @@ The first `'data'` listener starts the receive loop, and removing the last one s
 node examples/async_rw.mjs /dev/ttyUSB0 115200
 node examples/read_stream.mjs /dev/ttyUSB0 115200
 node examples/echo.mjs /dev/ttyUSB0 115200 "PING\r\n"
+```
+
+Retry after USB disconnect or I/O failure (examples accept `--reopen`):
+
+```bash
+node examples/read_stream.mjs /dev/ttyUSB0 115200 --reopen
+```
+
+Or in your own code:
+
+```js
+const port = open(path, baudRate, { autoReopen: true, reopenDelayMs: 500 })
 ```

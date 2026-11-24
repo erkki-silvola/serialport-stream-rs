@@ -120,6 +120,10 @@ cargo run --example tokio_read_stream --features stream -- /dev/ttyUSB0 115200
 
 Several examples accept `--trace` when built with `--features tracing`.
 
+## JavaScript (Node.js)
+
+A napi-rs addon in [`bindings`](bindings/README.md) exposes `open()`, Promise `read` / `write`, `for await` iteration, and EventEmitter `'data'` / `'error'` / `'close'` events.
+
 ## Acknowledgements
 
 Some of the platform I/O code is inspired by [serialport-rs](https://github.com/serialport/serialport-rs).

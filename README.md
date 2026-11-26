@@ -110,6 +110,7 @@ fn main() -> std::io::Result<()> {
 | `tokio_async_read` | default |
 | `tokio_async_rw` | default |
 | `tokio_split_rw` | default |
+| `smol_async_rw` | default |
 | `read_stream` | `stream` |
 | `tokio_read_stream` | `stream` |
 

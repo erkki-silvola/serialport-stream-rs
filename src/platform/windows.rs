@@ -57,12 +57,20 @@ impl Overlapped {
 
 struct InFlightOp {
     overlapped: Box<Overlapped>,
+    /// Owned copy of write data; never resized while the operation is pending.
+    buf: Vec<u8>,
 }
 
 impl InFlightOp {
+    #[cfg(not(feature = "stream"))]
     fn new() -> io::Result<Self> {
+        Self::with_buf(Vec::new())
+    }
+
+    fn with_buf(buf: Vec<u8>) -> io::Result<Self> {
         Ok(Self {
             overlapped: Box::new(Overlapped::new()?),
+            buf,
         })
     }
 
@@ -590,10 +598,12 @@ impl PlatformRead {
 }
 
 impl PlatformWrite {
-    /// Writes from `buf` without copying. If this returns `Pending`, overlapped `WriteFile` still
-    /// reads from the original pointer; callers must repoll with the same slice until `Ready`.
-    /// `futures` / Tokio `write` and `write_all` (and similar helpers) keep the same `&[u8]` across
-    /// `Pending` polls for each chunk.
+    /// Copies `buf` into the in-flight operation, so dropping the caller's future while `Pending`
+    /// never leaves the kernel reading a freed slice. Stays `Pending` until the overlapped
+    /// `WriteFile` completes.
+    ///
+    /// The copy is likely conservative: async runtimes typically retry with the same buffer, and
+    /// most drivers copy the data on submission anyway.
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let handle = self.write_port.raw();
         let shared = &self.write_shared;
@@ -601,15 +611,18 @@ impl PlatformWrite {
         let mut state = shared.state.lock().unwrap();
         match &mut *state {
             IoState::Idle => {
-                let mut op = match InFlightOp::new() {
+                let mut op = match InFlightOp::with_buf(buf.to_vec()) {
                     Ok(v) => v,
                     Err(e) => return Poll::Ready(Err(e)),
                 };
+                // SAFETY: `op.buf` is heap data never resized and `op.overlapped` is boxed; both move
+                // with `op` into `IoState::InFlight` and are dropped only after completion or
+                // `cancel_overlapped`.
                 let ok = unsafe {
                     WriteFile(
                         handle,
-                        buf.as_ptr() as *const _,
-                        buf.len() as u32,
+                        op.buf.as_ptr() as *const _,
+                        op.buf.len() as u32,
                         ptr::null_mut(),
                         op.overlapped.as_mut_ptr(),
                     )
@@ -644,6 +657,11 @@ impl PlatformWrite {
             IoState::InFlight(ref mut op) => match poll_in_flight(handle, op) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(bytes)) => {
+                    // A caller that drops a pending write (e.g. on timeout) and then writes
+                    // different data would receive the earlier write's completion. Treated as
+                    // caller misuse; if it must be supported, cancel the stale pending write and
+                    // discard a stale completed one before submitting the new buffer.
+                    assert_eq!(buf, op.buf);
                     shared.wait.clear();
                     *state = IoState::Idle;
                     Poll::Ready(Ok(bytes as usize))
@@ -745,7 +763,7 @@ fn read_available(
 
 fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
     let event = op.event();
-    match unsafe { WaitForSingleObjectEx(event, 0, TRUE) } {
+    match unsafe { WaitForSingleObject(event, 0) } {
         WAIT_OBJECT_0 => {
             let mut bytes = 0u32;
             let res =
@@ -761,7 +779,7 @@ fn poll_in_flight(port: HANDLE, op: &mut InFlightOp) -> Poll<io::Result<u32>> {
         WAIT_TIMEOUT => Poll::Pending,
         WAIT_FAILED => Poll::Ready(Err(io::Error::last_os_error())),
         _ => Poll::Ready(Err(io::Error::other(
-            "unexpected WaitForSingleObjectEx result",
+            "unexpected WaitForSingleObject result",
         ))),
     }
 }

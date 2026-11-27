@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - Unreleased
+
+##### Added
+
+* Example `smol_async_rw` showing async read and write with the [smol](https://docs.rs/smol) runtime.
+
+##### Fixed
+
+* [`AsyncWrite::poll_flush`](https://docs.rs/futures/latest/futures/io/trait.AsyncWrite.html#tymethod.poll_flush) no longer returns `Pending` without registering a wakeup after a previous `poll_write` returned `Pending`, which could stall a flush.
+* Windows: `poll_write` copies the caller's buffer into the in-flight overlapped write, so dropping a pending write future no longer leaves the kernel reading freed memory.
+
+##### Changed
+
+* Windows: a pending write must be re-polled with the same data until it completes; polling with different data after dropping a pending write now panics instead of reporting the earlier write's completion.
+* Windows `stream` feature: the receive thread checks for shutdown before each `WaitCommEvent`, so dropping the reader stops the background thread faster.
+
 ## [0.5.3] - 2026-11-04
 
 ##### Fixed

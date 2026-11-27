@@ -601,9 +601,9 @@ impl PlatformWrite {
     /// Copies `buf` into the in-flight operation, so dropping the caller's future while `Pending`
     /// never leaves the kernel reading a freed slice. Stays `Pending` until the overlapped
     /// `WriteFile` completes.
-    /// this is most likely "overkill" as
-    /// 1) Async runtimes use the same buf for each invocation
-    /// 2) Drivers usually copy the data
+    ///
+    /// The copy is likely conservative: async runtimes typically retry with the same buffer, and
+    /// most drivers copy the data on submission anyway.
     pub fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let handle = self.write_port.raw();
         let shared = &self.write_shared;
@@ -657,12 +657,10 @@ impl PlatformWrite {
             IoState::InFlight(ref mut op) => match poll_in_flight(handle, op) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(bytes)) => {
-                    // assert here
-                    // basically case can be that write with timeout and timeout fires first
-                    // but the write was not complete, next write will get the old complete
-                    // If this is hit, should change the behaviour so that in Pending state cancel -> new write
-                    // Ready -> discard
-                    // but in practise it is also logical error from user.
+                    // A caller that drops a pending write (e.g. on timeout) and then writes
+                    // different data would receive the earlier write's completion. Treated as
+                    // caller misuse; if it must be supported, cancel the stale pending write and
+                    // discard a stale completed one before submitting the new buffer.
                     assert_eq!(buf, op.buf);
                     shared.wait.clear();
                     *state = IoState::Idle;

@@ -197,7 +197,6 @@ impl SerialPortStreamBuilder {
             #[cfg(feature = "stream")]
             read_inner,
             flush_task: None,
-            write_in_flight: false,
         })
     }
 }
@@ -225,7 +224,6 @@ pub struct SerialPortStream {
     #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
-    write_in_flight: bool,
 }
 
 impl std::fmt::Debug for SerialPortStream {
@@ -233,7 +231,6 @@ impl std::fmt::Debug for SerialPortStream {
         f.debug_struct("SerialPortStream")
             .field("platform", &self.platform)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
-            .field("write_in_flight", &self.write_in_flight)
             .finish()
     }
 }
@@ -326,7 +323,6 @@ impl SerialPortStream {
             #[cfg(feature = "stream")]
             read_inner,
             flush_task,
-            write_in_flight,
         } = self;
         let (platform_read, platform_write, settings) = platform.split();
         (
@@ -338,7 +334,6 @@ impl SerialPortStream {
             SerialPortWriter {
                 platform: platform_write,
                 flush_task,
-                write_in_flight,
             },
             SerialportSettings { settings },
         )
@@ -469,7 +464,6 @@ impl Stream for SerialPortReader {
 pub struct SerialPortWriter {
     platform: PlatformWrite,
     flush_task: Option<blocking::Task<std::io::Result<()>>>,
-    write_in_flight: bool,
 }
 
 /// Line settings for a split port (baud rate, etc.).
@@ -486,7 +480,6 @@ impl std::fmt::Debug for SerialPortWriter {
         f.debug_struct("SerialPortWriter")
             .field("platform", &self.platform)
             .field("flush_task", &self.flush_task.as_ref().map(|_| "..."))
-            .field("write_in_flight", &self.write_in_flight)
             .finish()
     }
 }
@@ -510,19 +503,11 @@ impl AsyncWrite for SerialPortWriter {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
-        let this = self.as_mut().get_mut();
-        let result = this.platform.poll_write(cx, buf);
-        this.write_in_flight = result.is_pending();
-        result
+        self.as_mut().get_mut().platform.poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.as_mut().get_mut();
-
-        if this.write_in_flight {
-            return Poll::Pending;
-        }
-
         if this.flush_task.is_none() {
             this.flush_task = Some(this.platform.flush_tx_unblocked());
         }
@@ -580,19 +565,11 @@ impl AsyncWrite for SerialPortStream {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         assert!(!buf.is_empty());
-        let this = self.as_mut().get_mut();
-        let result = this.platform.poll_write(cx, buf);
-        this.write_in_flight = result.is_pending();
-        result
+        self.as_mut().get_mut().platform.poll_write(cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let this = self.as_mut().get_mut();
-
-        if this.write_in_flight {
-            return Poll::Pending;
-        }
-
         if this.flush_task.is_none() {
             this.flush_task = Some(this.platform.flush_tx_unblocked());
         }

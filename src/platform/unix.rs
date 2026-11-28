@@ -5,7 +5,6 @@ use std::os::fd::AsFd;
 use std::os::fd::BorrowedFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::pin::Pin;
-#[cfg(feature = "stream")]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -16,17 +15,17 @@ use futures::io::AsyncWrite as _;
 use nix::errno::Errno;
 
 #[cfg(feature = "stream")]
-use nix::libc::{c_int, ioctl, FIONREAD};
-#[cfg(feature = "stream")]
-use nix::poll::{poll, PollFd, PollFlags};
-#[cfg(feature = "stream")]
-use std::sync::mpsc;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 #[cfg(feature = "stream")]
 use crate::EventsInnerRead;
 use crate::SerialPortStreamBuilder;
 
 mod serial;
+
+fn disconnected() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "device disconnected")
+}
 
 #[cfg(not(feature = "stream"))]
 #[derive(Debug)]
@@ -36,10 +35,7 @@ struct SerialRead(OwnedFd);
 impl Read for SerialRead {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match nix::unistd::read(self.0.as_fd(), buf) {
-            Ok(0) => Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "device disconnected",
-            )),
+            Ok(0) => Err(disconnected()),
             Ok(n) => Ok(n),
             Err(Errno::EAGAIN) => Err(io::ErrorKind::WouldBlock.into()),
             Err(e) => Err(e.into()),
@@ -82,12 +78,6 @@ impl AsFd for SerialWrite {
 
 unsafe impl async_io::IoSafe for SerialWrite {}
 
-#[cfg(feature = "stream")]
-#[derive(Debug)]
-struct UnixInner {
-    cancel_pipe: (OwnedFd, OwnedFd),
-}
-
 #[derive(Debug)]
 pub struct PlatformRead {
     #[cfg(not(feature = "stream"))]
@@ -97,15 +87,17 @@ pub struct PlatformRead {
     #[cfg(feature = "stream")]
     read_inner: Arc<EventsInnerRead>,
     #[cfg(feature = "stream")]
-    unix_inner: UnixInner,
-    #[cfg(feature = "stream")]
     read_fd: Option<OwnedFd>,
+    #[cfg(feature = "stream")]
+    cancel_rx: Option<OwnedFd>,
+    #[cfg(feature = "stream")]
+    cancel_tx: Option<OwnedFd>,
 }
 
 #[derive(Debug)]
 pub struct PlatformWrite {
     write_async: Async<SerialWrite>,
-    flush_fd: OwnedFd,
+    flush_fd: Arc<OwnedFd>,
 }
 
 #[derive(Debug)]
@@ -128,19 +120,11 @@ impl Drop for PlatformRead {
     fn drop(&mut self) {
         #[cfg(feature = "stream")]
         {
-            let read_running = self
-                .read_thread_handle
-                .as_ref()
-                .is_some_and(|handle| !handle.is_finished());
-            if read_running {
-                let fd = self.unix_inner.cancel_pipe.1.as_fd();
-                assert_eq!(nix::unistd::write(fd, &[1u8]).unwrap(), 1);
+            if let Some(cancel_tx) = self.cancel_tx.take() {
+                let _ = nix::unistd::write(&cancel_tx, &[1u8]);
             }
-
             if let Some(handle) = self.read_thread_handle.take() {
-                if !handle.is_finished() {
-                    handle.join().unwrap();
-                }
+                let _ = handle.join();
             }
         }
     }
@@ -166,19 +150,19 @@ impl PlatformStream {
         }
         let port_fd = port.as_fd();
         #[cfg(not(feature = "stream"))]
-        let read_fd = nix::unistd::dup(port_fd)?;
-        let write_fd = nix::unistd::dup(port_fd)?;
-        let flush_fd = nix::unistd::dup(port_fd)?;
-        let settings_fd = nix::unistd::dup(port_fd)?;
+        let read_fd = serial::dup_cloexec(port_fd)?;
+        let write_fd = serial::dup_cloexec(port_fd)?;
+        let flush_fd = serial::dup_cloexec(port_fd)?;
+        let settings_fd = serial::dup_cloexec(port_fd)?;
         #[cfg(not(feature = "stream"))]
         let read_async = Async::new_nonblocking(SerialRead(read_fd))?;
         #[cfg(feature = "stream")]
-        let stream_read_fd = Some(nix::unistd::dup(port_fd)?);
+        let stream_read_fd = serial::dup_cloexec(port_fd)?;
         let write_async = Async::new_nonblocking(SerialWrite(write_fd))?;
         drop(port);
 
         #[cfg(feature = "stream")]
-        let cancel_pipe = nix::unistd::pipe().unwrap();
+        let (cancel_rx, cancel_tx) = nix::unistd::pipe()?;
 
         Ok(Self {
             read: PlatformRead {
@@ -189,13 +173,15 @@ impl PlatformStream {
                 #[cfg(feature = "stream")]
                 read_inner,
                 #[cfg(feature = "stream")]
-                unix_inner: UnixInner { cancel_pipe },
+                read_fd: Some(stream_read_fd),
                 #[cfg(feature = "stream")]
-                read_fd: stream_read_fd,
+                cancel_rx: Some(cancel_rx),
+                #[cfg(feature = "stream")]
+                cancel_tx: Some(cancel_tx),
             },
             write: PlatformWrite {
                 write_async,
-                flush_fd,
+                flush_fd: Arc::new(flush_fd),
             },
             settings: PlatformSettings(settings_fd),
         })
@@ -254,96 +240,63 @@ impl PlatformRead {
 
     #[cfg(feature = "stream")]
     pub fn start_read_thread(&mut self) {
-        assert!(self.read_thread_handle.is_none());
-
-        let (tx, rx) = mpsc::channel();
-        let read_inner_cloned = self.read_inner.clone();
-        let cancel_fd = self.unix_inner.cancel_pipe.0.as_raw_fd();
-        let read_fd = self.read_fd.take().unwrap();
-
+        let (Some(read_fd), Some(cancel_fd)) = (self.read_fd.take(), self.cancel_rx.take()) else {
+            return;
+        };
+        let read_inner = self.read_inner.clone();
         self.read_thread_handle = Some(std::thread::spawn(move || {
-            tx.send(0).unwrap();
-            if let Err(err) = Self::receive_thread(&read_inner_cloned, read_fd, cancel_fd) {
-                *read_inner_cloned.stream_error.lock().unwrap() = Some(err);
-                read_inner_cloned.waker.wake();
+            if let Err(err) = Self::receive_thread(&read_inner, read_fd, cancel_fd) {
+                *read_inner.stream_error.lock().unwrap() = Some(err);
+                read_inner.waker.wake();
             }
         }));
-        rx.recv().expect("Failed to start thread");
-    }
-
-    #[cfg(feature = "stream")]
-    fn bytes_to_read_fd(fd: BorrowedFd<'_>) -> std::io::Result<u32> {
-        let mut count: c_int = 0;
-        let ret = unsafe { ioctl(fd.as_raw_fd(), FIONREAD, &mut count) };
-        if ret == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(count.max(0) as u32)
     }
 
     #[cfg(feature = "stream")]
     fn receive_thread(
-        read_inner: &Arc<EventsInnerRead>,
+        read_inner: &EventsInnerRead,
         read_fd: OwnedFd,
-        cancel_fd: i32,
+        cancel_fd: OwnedFd,
     ) -> std::io::Result<()> {
-        let read_fd_raw = read_fd.as_raw_fd();
-        let mut buffer = Vec::with_capacity(1024);
-
-        let purge_pending_data = |buffer: &mut Vec<u8>| -> std::io::Result<()> {
-            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(read_fd_raw) };
-            let bytes_count = Self::bytes_to_read_fd(borrowed_fd)?;
-            if bytes_count > 0 {
-                buffer.resize(bytes_count as usize, 0);
-                let did_read = match nix::unistd::read(borrowed_fd, buffer) {
-                    Ok(n) => n,
-                    Err(Errno::EAGAIN) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::info!("EAGAIN for read");
-                        0
-                    }
-                    Err(e) => return Err(std::io::Error::from(e)),
-                };
-                if did_read > 0 {
-                    buffer.truncate(did_read);
-                    read_inner
-                        .in_buffer
-                        .lock()
-                        .unwrap()
-                        .extend_from_slice(buffer);
-                    buffer.clear();
-                    read_inner.waker.wake();
-                }
-            }
-            Ok(())
-        };
-
-        purge_pending_data(&mut buffer)?;
-
+        let mut buffer = [0u8; 4096];
         loop {
-            let read_fd_ = unsafe { BorrowedFd::borrow_raw(read_fd_raw) };
-            let cancel_fd_ = unsafe { BorrowedFd::borrow_raw(cancel_fd) };
             let mut poll_fds = [
-                PollFd::new(read_fd_, PollFlags::POLLIN),
-                PollFd::new(cancel_fd_, PollFlags::POLLIN),
+                PollFd::new(read_fd.as_fd(), PollFlags::POLLIN),
+                PollFd::new(cancel_fd.as_fd(), PollFlags::POLLIN),
             ];
-
-            let poll_result = poll(&mut poll_fds, nix::poll::PollTimeout::NONE)?;
-            assert!(poll_result != 0);
+            match poll(&mut poll_fds, PollTimeout::NONE) {
+                Ok(_) => {}
+                Err(e) => return Err(e.into()),
+            }
 
             if poll_fds[1]
                 .revents()
-                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+                .is_some_and(|events| !events.is_empty())
             {
                 return Ok(());
             }
 
-            if let Some(read_poll) = poll_fds[0].revents() {
-                if read_poll.contains(PollFlags::POLLIN) {
-                    purge_pending_data(&mut buffer)?;
-                } else {
-                    return Err(std::io::Error::other("read fd events != POLLIN"));
+            let Some(events) = poll_fds[0].revents() else {
+                continue;
+            };
+            if events.contains(PollFlags::POLLIN) {
+                match nix::unistd::read(read_fd.as_fd(), &mut buffer) {
+                    Ok(0) => return Err(disconnected()),
+                    Ok(n) => {
+                        read_inner
+                            .in_buffer
+                            .lock()
+                            .unwrap()
+                            .extend_from_slice(&buffer[..n]);
+                        read_inner.waker.wake();
+                    }
+                    Err(Errno::EAGAIN) => {}
+                    Err(e) => return Err(e.into()),
                 }
+            } else if events
+                .intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
+            {
+                return Err(disconnected());
             }
         }
     }
@@ -351,8 +304,8 @@ impl PlatformRead {
 
 impl PlatformWrite {
     pub fn flush_tx_unblocked(&self) -> blocking::Task<std::io::Result<()>> {
-        let fd = self.flush_fd.as_raw_fd();
-        blocking::unblock(move || serial::flush_output(fd))
+        let fd = self.flush_fd.clone();
+        blocking::unblock(move || serial::flush_output(fd.as_raw_fd()))
     }
 
     /// Writes from `buf` without copying. On `Pending`, `async_io` retries from the same slice
@@ -363,8 +316,3 @@ impl PlatformWrite {
         Pin::new(&mut self.write_async).poll_write(cx, buf)
     }
 }
-
-unsafe impl Send for PlatformRead {}
-unsafe impl Sync for PlatformRead {}
-unsafe impl Send for PlatformWrite {}
-unsafe impl Sync for PlatformWrite {}
